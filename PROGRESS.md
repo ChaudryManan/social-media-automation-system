@@ -10,7 +10,7 @@
 > **Start task `B1-03` (Core infrastructure) in `TASKS.md`.**
 > Add settings, structured logging with request IDs, the application error hierarchy/handler, and configured CORS.
 
-Last updated: 2026-11-13 · Last agent: Codex · Branch: `main` · Last commit: `B1-02: docker compose and health endpoints`
+Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last commit: `0f34c16 B1-02: docker compose and health endpoints`
 
 ## 2. How to resume (any agent)
 
@@ -94,6 +94,13 @@ Template — copy for each session:
 - Next: <the precise next action — also copied to section 1>
 - Watch out: <gotchas, flaky tests, decisions the next agent must know>
 ```
+
+### 2026-11-14 — Antigravity — B1-02 verification
+- Did: Verified git status, lint, and test suite baseline; confirmed `tests/unit/test_health.py` is tracked by git in commit `0f34c16`; verified healthcheck timings in `docker-compose.yml` match specifications across all 5 services; confirmed `TASKS.md` has B1-02 marked complete.
+- State: tests pass (4 passed, 1 third-party deprecation warning), lint clean, branch `main`, last commit `0f34c16 B1-02: docker compose and health endpoints`.
+- Left undone: nothing for B1-02.
+- Next: start B1-03 (Core infrastructure) in `TASKS.md`: add settings, structured logging with request IDs, application error hierarchy/handler, and configured CORS.
+- Watch out: User manages Docker Compose locally; do not run docker/docker compose commands. No live network in default tests.
 
 ### 2026-11-13 — Codex — B1-02
 - Did: Added the shared Docker Compose application image, five services and healthchecks, minimal FastAPI liveness/readiness endpoints, health tests, and `make dev` stack startup; increased first-start healthcheck windows.
