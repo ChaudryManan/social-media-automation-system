@@ -18,7 +18,7 @@ Goal: runnable backend with auth, roles, workspaces and limits.
   **Done when:** `make lint` and `make test` run (even with a placeholder test) and pass.
 - [x] **B1-02 Docker Compose** — Services `api`, `worker`, `beat`, `postgres`, `redis` with healthchecks; `GET /health` and `GET /health/ready` (db + redis check).
   **Done when:** `docker compose up` starts all; `/health/ready` returns 200. **Dep:** B1-01.
-- [ ] **B1-03 Core infrastructure** — `core/config.py` (pydantic-settings), structured JSON logging with request id middleware, `AppError` hierarchy + global handler producing the standard error format, CORS from env.
+- [x] **B1-03 Core infrastructure** — `core/config.py` (pydantic-settings), structured JSON logging with request id middleware, `AppError` hierarchy + global handler producing the standard error format, CORS from env.
   **Done when:** a test hits an endpoint that raises `AppError` and gets `{error:{code,message,details}}`. **Dep:** B1-01.
 - [ ] **B1-04 Database and first migration** — SQLAlchemy base/session (`core/db.py`), Alembic setup; migration for `users`, `refresh_tokens`, `user_limits`, `workspaces`, `audit_logs`, `system_settings` per `DATABASE.md`. Decide enum strategy (PG enum vs text+CHECK) and record it in `PROGRESS.md` Decisions.
   **Done when:** `make migrate` on an empty DB creates the tables; downgrade works. **Dep:** B1-02, B1-03.

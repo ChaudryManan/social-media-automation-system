@@ -7,10 +7,10 @@
 
 ## 1. NEXT ACTION (one precise step)
 
-> **Start task `B1-03` (Core infrastructure) in `TASKS.md`.**
-> Add settings, structured logging with request IDs, the application error hierarchy/handler, and configured CORS.
+> **Start task `B1-04` (Database and first migration) in `TASKS.md`.**
+> Add SQLAlchemy base/session (`core/db.py`), Alembic setup, initial migrations for core tables per `DATABASE.md`, and decide the enum strategy.
 
-Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last commit: `0f34c16 B1-02: docker compose and health endpoints`
+Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last commit: `B1-03: config, logging and error handling`
 
 ## 2. How to resume (any agent)
 
@@ -24,7 +24,7 @@ Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last co
 | Phase | Scope | Status | Done / Total |
 |---|---|---|---|
 | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
-| B1 | Foundation: auth, roles, workspaces, limits | In progress | 2 / 10 |
+| B1 | Foundation: auth, roles, workspaces, limits | In progress | 3 / 10 |
 | B2 | Agent engine (post flow) | Not started | 0 / 13 |
 | B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 18 |
 | B4 | Video flow | Not started | 0 / 10 |
@@ -43,6 +43,7 @@ Milestones:
 
 ## 5. Recently completed (newest first, keep last ~10)
 
+- 2026-11-14 — B1-03 completed: Core infrastructure with typed pydantic-settings, structured JSON logging with request-ID propagation, AppError hierarchy with global exception handlers (including 422 mapping), and CORS middleware.
 - 2026-11-13 — B1-02 completed: Compose services and healthchecks, minimal FastAPI liveness/readiness endpoints, health tests, and Windows-friendly first-start timing.
 - 2026-11-13 — B1-01 completed: repository package scaffold, pinned Python tooling, project-local `.venv` Make targets, environment template, and placeholder test.
 - 2026-11-13 — `AGENT_SPECS.md` added (per-agent schemas, checks, prompt rules, re-entry table, test fixtures); referenced from AGENTS, TASKS (B2, B4) and ARCHITECTURE.
@@ -72,7 +73,7 @@ Milestones:
 ## 8. Known issues, blockers, open questions
 
 **Known issues / tech debt:**
-- The Dockerfile currently installs only Celery, FastAPI, psycopg, Redis, and Uvicorn. Any task that adds a runtime dependency must also update the Dockerfile.
+- The Dockerfile currently installs Celery, FastAPI, psycopg, pydantic, pydantic-settings, Redis, and Uvicorn. Any task that adds a runtime dependency must also update the Dockerfile.
 - Worker and Beat healthchecks are simple Redis pings until the Celery app exists in B3-06.
 
 **Blocked (`[!]` tasks):** *(none)*
@@ -94,6 +95,13 @@ Template — copy for each session:
 - Next: <the precise next action — also copied to section 1>
 - Watch out: <gotchas, flaky tests, decisions the next agent must know>
 ```
+
+### 2026-11-14 — Antigravity — B1-03
+- Did: Implemented `core/config.py` using `pydantic-settings` with environment overrides and CORS parsing; added structured JSON logging and `RequestIDMiddleware` (`X-Request-ID` extraction/generation and context propagation); added `AppError` hierarchy and global exception handlers for `AppError`, `RequestValidationError`, `HTTPException`, and unhandled errors; configured CORS middleware; synced runtime dependencies in `Dockerfile`; added unit tests for config, error handling, and middleware (16 passing tests total).
+- State: tests pass (16 passed, 1 third-party deprecation warning), lint clean (`make lint`), branch `main`.
+- Left undone: nothing for B1-03.
+- Next: start task B1-04 (Database and first migration) in `TASKS.md`.
+- Watch out: Remember to sync `Dockerfile` runtime dependencies whenever new packages are added.
 
 ### 2026-11-14 — Antigravity — B1-02 verification
 - Did: Verified git status, lint, and test suite baseline; confirmed `tests/unit/test_health.py` is tracked by git in commit `0f34c16`; verified healthcheck timings in `docker-compose.yml` match specifications across all 5 services; confirmed `TASKS.md` has B1-02 marked complete.

@@ -13,6 +13,8 @@ RUN pip install --no-cache-dir \
         "celery==5.5.3" \
         "fastapi==0.115.12" \
         "psycopg[binary]==3.2.9" \
+        "pydantic==2.11.4" \
+        "pydantic-settings==2.9.1" \
         "redis==6.2.0" \
         "uvicorn==0.34.2" \
     && pip install --no-cache-dir --no-deps .

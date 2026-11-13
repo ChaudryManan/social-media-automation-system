@@ -1,18 +1,20 @@
-"""Minimal FastAPI application and container health endpoints."""
-
-import os
+"""FastAPI application entrypoint with middleware and health endpoints."""
 
 import psycopg
 import redis
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="Social Media Automation Platform")
+from app.core.config import settings
+from app.core.errors import register_error_handlers
+from app.core.logging import setup_logging
+from app.core.middleware import RequestIDMiddleware
 
 
 def _database_is_available() -> bool:
     """Return whether PostgreSQL accepts a lightweight query."""
-    database_url = os.getenv("DATABASE_URL")
+    database_url = settings.DATABASE_URL
     if not database_url:
         return False
 
@@ -27,7 +29,7 @@ def _database_is_available() -> bool:
 
 def _redis_is_available() -> bool:
     """Return whether Redis accepts a ping."""
-    redis_url = os.getenv("REDIS_URL")
+    redis_url = settings.REDIS_URL
     if not redis_url:
         return False
 
@@ -44,21 +46,51 @@ def _redis_is_available() -> bool:
         client.close()
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
-    """Report that the API process is alive."""
-    return {"status": "ok"}
+def create_app() -> FastAPI:
+    """Build and configure the FastAPI application."""
+    setup_logging(settings.LOG_LEVEL)
 
-
-@app.get("/health/ready")
-def ready() -> JSONResponse:
-    """Report whether the API's database and Redis dependencies are ready."""
-    checks = {
-        "database": _database_is_available(),
-        "redis": _redis_is_available(),
-    }
-    is_ready = all(checks.values())
-    return JSONResponse(
-        status_code=200 if is_ready else 503,
-        content={"status": "ok" if is_ready else "not_ready", "checks": checks},
+    application = FastAPI(
+        title="Social Media Automation Platform",
+        version="0.1.0",
     )
+
+    # Middleware execution order: RequestIDMiddleware runs on all requests;
+    # CORSMiddleware handles cross-origin preflight and headers.
+    application.add_middleware(RequestIDMiddleware)
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-Request-ID"],
+    )
+
+    register_error_handlers(application)
+
+    @application.get("/health")
+    def health() -> dict[str, str]:
+        """Report that the API process is alive."""
+        return {"status": "ok"}
+
+    @application.get("/health/ready")
+    def ready() -> JSONResponse:
+        """Report whether API database and Redis dependencies are ready."""
+        checks = {
+            "database": _database_is_available(),
+            "redis": _redis_is_available(),
+        }
+        is_ready = all(checks.values())
+        return JSONResponse(
+            status_code=200 if is_ready else 503,
+            content={
+                "status": "ok" if is_ready else "not_ready",
+                "checks": checks,
+            },
+        )
+
+    return application
+
+
+app = create_app()
