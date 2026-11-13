@@ -85,7 +85,7 @@ repo-root/
    │  ├─ collectors/                # base.py, mock.py, per-platform collectors
    │  ├─ storage/                   # base.py, local.py, s3.py
    │  └─ workers/                   # celery_app.py, tasks_workflow.py, tasks_publish.py, tasks_metrics.py, tasks_scheduler.py
-   └─ tests/                        # unit/, integration/, e2e/
+└─ tests/                           # unit/, integration/, e2e/
 ```
 
 Rule: dependencies point inward → `api` → `services` → `models`; `agents` and `workers` call `services`; `services` never import `api`.
