@@ -7,10 +7,10 @@
 
 ## 1. NEXT ACTION (one precise step)
 
-> **Start task `B1-01` (Repo scaffold and tooling) in `TASKS.md`.**
-> Create the folder layout from `ARCHITECTURE.md` section 3, `pyproject.toml`, ruff/pytest config, `Makefile` (`dev`, `test`, `lint`, `format`, `migrate`, `seed`), `.env.example`, `.gitignore`. Done when `make lint` and `make test` run and pass.
+> **Start task `B1-02` (Docker Compose) in `TASKS.md`.**
+> Add the `api`, `worker`, `beat`, `postgres`, and `redis` Compose services with healthchecks, then implement `GET /health` and `GET /health/ready`.
 
-Last updated: 2026-11-13 · Last agent: Claude (chat, wrote the planning docs) · Branch: `main` · Last commit: *(none yet — repo not created)*
+Last updated: 2026-11-13 · Last agent: Codex · Branch: `main` · Last commit: `B1-01: scaffold repo and tooling`
 
 ## 2. How to resume (any agent)
 
@@ -24,7 +24,7 @@ Last updated: 2026-11-13 · Last agent: Claude (chat, wrote the planning docs) �
 | Phase | Scope | Status | Done / Total |
 |---|---|---|---|
 | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
-| B1 | Foundation: auth, roles, workspaces, limits | Not started | 0 / 10 |
+| B1 | Foundation: auth, roles, workspaces, limits | In progress | 1 / 10 |
 | B2 | Agent engine (post flow) | Not started | 0 / 13 |
 | B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 18 |
 | B4 | Video flow | Not started | 0 / 10 |
@@ -43,6 +43,7 @@ Milestones:
 
 ## 5. Recently completed (newest first, keep last ~10)
 
+- 2026-11-13 — B1-01 completed: repository package scaffold, pinned Python tooling, project-local `.venv` Make targets, environment template, and placeholder test.
 - 2026-11-13 — `AGENT_SPECS.md` added (per-agent schemas, checks, prompt rules, re-entry table, test fixtures); referenced from AGENTS, TASKS (B2, B4) and ARCHITECTURE.
 - 2026-11-13 — Planning docs written (PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, CLAUDE).
 
@@ -52,7 +53,7 @@ Milestones:
 - Python: 3.11+ · DB: PostgreSQL 16 · Queue: Redis + Celery/Beat · Agents: LangGraph.
 - Local run: `docker compose up` (after B1-02). Tests: `make test` (offline, fake LLM, mock publisher).
 - Default dev env values: `LLM_PROVIDER=fake`, `PUBLISHER_MODE=mock`, fake image/video/TTS/search providers.
-- Notes on ports, keys, or machine quirks: *(none yet)*
+- Windows: GNU Make 4.4.1 installed via winget; `make` creates and uses the project-local `.venv` with Python 3.13. Docker Desktop with WSL2 is required from B1-02.
 
 ## 7. Decisions log (append-only; newest first)
 
@@ -87,6 +88,13 @@ Template — copy for each session:
 - Next: <the precise next action — also copied to section 1>
 - Watch out: <gotchas, flaky tests, decisions the next agent must know>
 ```
+
+### 2026-11-13 — Codex — B1-01
+- Did: Created the documented package skeleton, pinned `pyproject.toml` dependencies, ruff/pytest settings, a Windows-compatible `.venv` Makefile, `.env.example`, ignore and line-ending rules, README, and an offline placeholder test.
+- State: tests pass (1 passed), lint clean, branch `main`, last commit `B1-01: scaffold repo and tooling`.
+- Left undone: nothing.
+- Next: start B1-02 by adding the Docker Compose stack and health endpoints.
+- Watch out: GNU Make was installed for the current user via winget. The pre-existing `PROGRESS.md` last-commit field was stale; the confirmed repository began at `e190975` (`adding project files`).
 
 ### 2026-11-13 — Claude (chat) — planning
 - Did: Wrote `PRD.md`, `ARCHITECTURE.md`, `DATABASE.md`, `TASKS.md`, `AGENTS.md`, `PROGRESS.md`, `CLAUDE.md`. Project split into modules M0–M15 and phases B1–B6 (backend first).

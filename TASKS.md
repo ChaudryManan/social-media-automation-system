@@ -14,7 +14,7 @@ Phases: **B1** Foundation → **B2** Agent engine (post) → **B3** Core pipelin
 
 Goal: runnable backend with auth, roles, workspaces and limits.
 
-- [ ] **B1-01 Repo scaffold and tooling** — Create folder layout from `ARCHITECTURE.md` section 3, `pyproject.toml` (deps pinned), ruff config, pytest config, `Makefile` targets (`dev`, `test`, `lint`, `format`, `migrate`, `seed`), `.env.example`, `.gitignore`.
+- [x] **B1-01 Repo scaffold and tooling** — Create folder layout from `ARCHITECTURE.md` section 3, `pyproject.toml` (deps pinned), ruff config, pytest config, `Makefile` targets (`dev`, `test`, `lint`, `format`, `migrate`, `seed`), `.env.example`, `.gitignore`.
   **Done when:** `make lint` and `make test` run (even with a placeholder test) and pass.
 - [ ] **B1-02 Docker Compose** — Services `api`, `worker`, `beat`, `postgres`, `redis` with healthchecks; `GET /health` and `GET /health/ready` (db + redis check).
   **Done when:** `docker compose up` starts all; `/health/ready` returns 200. **Dep:** B1-01.
