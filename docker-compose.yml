@@ -1,0 +1,78 @@
+services:
+  api:
+    image: social-media-automation:dev
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment:
+      DATABASE_URL: postgresql+psycopg://sma:sma@postgres:5432/sma
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8000/health/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  worker:
+    image: social-media-automation:dev
+    command: celery -b redis://redis:6379/0 worker --loglevel=info --hostname=worker@%h
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis; redis.Redis.from_url('redis://redis:6379/0').ping()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  beat:
+    image: social-media-automation:dev
+    command: celery -b redis://redis:6379/0 beat --loglevel=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis; redis.Redis.from_url('redis://redis:6379/0').ping()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: sma
+      POSTGRES_USER: sma
+      POSTGRES_PASSWORD: sma
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sma -d sma"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+volumes:
+  postgres_data:

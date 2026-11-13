@@ -18,7 +18,7 @@ $(VENV_STAMP): pyproject.toml
 venv: $(VENV_STAMP)
 
 dev: venv
-	@echo "B1-02 will add the API application and Docker Compose development stack."
+	docker compose up --build
 
 test: venv
 	$(VENV_PYTHON) -m pytest

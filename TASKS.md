@@ -16,7 +16,7 @@ Goal: runnable backend with auth, roles, workspaces and limits.
 
 - [x] **B1-01 Repo scaffold and tooling** — Create folder layout from `ARCHITECTURE.md` section 3, `pyproject.toml` (deps pinned), ruff config, pytest config, `Makefile` targets (`dev`, `test`, `lint`, `format`, `migrate`, `seed`), `.env.example`, `.gitignore`.
   **Done when:** `make lint` and `make test` run (even with a placeholder test) and pass.
-- [ ] **B1-02 Docker Compose** — Services `api`, `worker`, `beat`, `postgres`, `redis` with healthchecks; `GET /health` and `GET /health/ready` (db + redis check).
+- [x] **B1-02 Docker Compose** — Services `api`, `worker`, `beat`, `postgres`, `redis` with healthchecks; `GET /health` and `GET /health/ready` (db + redis check).
   **Done when:** `docker compose up` starts all; `/health/ready` returns 200. **Dep:** B1-01.
 - [ ] **B1-03 Core infrastructure** — `core/config.py` (pydantic-settings), structured JSON logging with request id middleware, `AppError` hierarchy + global handler producing the standard error format, CORS from env.
   **Done when:** a test hits an endpoint that raises `AppError` and gets `{error:{code,message,details}}`. **Dep:** B1-01.
