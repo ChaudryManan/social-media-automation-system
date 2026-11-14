@@ -56,9 +56,9 @@ class Settings(BaseSettings):
     TIKTOK_CLIENT_KEY: str | None = None
     TIKTOK_CLIENT_SECRET: str | None = None
 
-    # Seeding
-    SEED_ADMIN_EMAIL: str = "admin@example.com"
-    SEED_ADMIN_PASSWORD: str = "change-me"
+    # Seeding (required for make seed; credentials must be in environment)
+    SEED_ADMIN_EMAIL: str | None = None
+    SEED_ADMIN_PASSWORD: str | None = None
 
     @field_validator("CORS_ORIGINS")
     @classmethod

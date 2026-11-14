@@ -38,4 +38,4 @@ migration: venv
 	$(VENV_PYTHON) -m alembic revision --autogenerate -m "$(m)"
 
 seed: venv
-	@echo "B1-06 will add the idempotent admin seed command."
+	$(VENV_PYTHON) -m app.services.seed

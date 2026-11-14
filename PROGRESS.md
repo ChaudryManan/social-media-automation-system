@@ -7,10 +7,10 @@
 
 ## 1. NEXT ACTION (one precise step)
 
-> **Start task `B1-06` (RBAC and admin seed) in `TASKS.md`.**
-> Implement `require_admin` dependency, `make seed` CLI command to create admin user idempotently from settings, and populate default `system_settings`.
+> **Start task `B1-07` (Password reset) in `TASKS.md`.**
+> Implement `forgot-password` and `reset-password` endpoints with single-use expiring token; add email sender interface with console implementation per `PRD.md` FR-1.2 and `DATABASE.md` 4.2.
 
-Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last commit: `B1-05: auth endpoints, argon2 hashing and jwt tokens`
+Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last commit: `B1-06: rbac, admin dependency and seed command`
 
 ## 2. How to resume (any agent)
 
@@ -24,7 +24,7 @@ Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last co
 | Phase | Scope | Status | Done / Total |
 |---|---|---|---|
 | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
-| B1 | Foundation: auth, roles, workspaces, limits | In progress | 5 / 11 |
+| B1 | Foundation: auth, roles, workspaces, limits | In progress | 6 / 11 |
 | B2 | Agent engine (post flow) | Not started | 0 / 13 |
 | B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 18 |
 | B4 | Video flow | Not started | 0 / 10 |
@@ -43,6 +43,7 @@ Milestones:
 
 ## 5. Recently completed (newest first, keep last ~10)
 
+- 2026-11-14 — B1-06 completed: RBAC and admin seed. Implemented `require_admin` dependency (`core/deps.py`), admin router with dummy authorization test route (`api/v1/admin.py`), idempotent seeding service (`services/seed.py`) with secure environment credential validation and automatic user promotion protection, 12 canonical system settings without overwriting customizations, and `make seed` Makefile target. Full unit and integration test coverage (`test_rbac.py`, `test_seed_service.py`, `test_admin_seed.py`).
 - 2026-11-14 — B1-05 completed: Auth endpoints. Implemented Argon2id password hashing and PyJWT access token generation (`core/security.py`), bearer token auth dependency (`core/deps.py`), Pydantic schemas (`schemas/auth.py`), service layer (`services/auth.py`), and FastAPI routes (`api/v1/auth.py`) for `/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, and `/auth/me` (with dual `/api/v1/auth` mounting). Enforced inactive user blocks, case-insensitive email uniqueness, and token rotation. Full unit and integration test coverage (44 passing tests).
 - 2026-11-14 — B1-04 completed: Database and first migration. Added SQLAlchemy 2.0 sync engine + Base + session dependency (`core/db.py`), 6 foundation models (`users`, `refresh_tokens`, `user_limits`, `workspaces`, `audit_logs`, `system_settings`), Alembic configuration and initial migration (`0001_initial_schema`), `make migrate`/`downgrade`/`migration` targets, model unit tests and migration upgrade/downgrade integration test (23 tests total passing). Resolved host IPv6 port resolution delay by standardizing on `127.0.0.1:15432`.
 - 2026-11-14 — B1-03 completed: Core infrastructure with typed pydantic-settings, structured JSON logging with request-ID propagation, AppError hierarchy with global exception handlers (including 422 mapping), and CORS middleware.
@@ -100,6 +101,19 @@ Template — copy for each session:
 - Next: <the precise next action — also copied to section 1>
 - Watch out: <gotchas, flaky tests, decisions the next agent must know>
 ```
+
+### 2026-11-14 — Antigravity — B1-06
+- Did: Implemented RBAC and admin seeding per PRD FR-1.3 and TASKS.md B1-06:
+  - Added `require_admin` dependency in `core/deps.py` enforcing `admin` role and active account status (raising HTTP 403 `admin_required`).
+  - Created `api/v1/admin.py` with dummy test endpoint `/admin/test` (dual mounted at `/admin` and `/api/v1/admin`).
+  - Configured `SEED_ADMIN_EMAIL` and `SEED_ADMIN_PASSWORD` in `core/config.py` without insecure defaults (requires environment values; safe placeholders in `.env.example`).
+  - Implemented idempotent seeding service in `services/seed.py` (`seed_admin`, `seed_system_settings`, `seed_all`) that safely validates environment credentials, prevents automatic role promotion of existing regular users (raises `ValueError` and preserves existing password/role), creates new admin idempotently, and inserts 12 canonical system settings without overwriting customizations.
+  - Updated `Makefile` `make seed` target.
+  - Added unit tests in `test_rbac.py` and `test_seed_service.py` (36 unit tests passing total, covering missing credentials, new admin creation, role promotion prevention, idempotency, settings preservation) and integration tests in `test_admin_seed.py`.
+- State: tests pass (36 passed, 23 skipped offline when PostgreSQL is not running), lint clean (`make lint`), branch `main`.
+- Left undone: nothing for B1-06.
+- Next: start task B1-07 (Password reset) in `TASKS.md`: `forgot-password` and `reset-password` endpoints with single-use expiring token; email sender interface with console implementation.
+- Watch out: Running `make seed` is completely safe and idempotent; it will not duplicate accounts, will not overwrite modified system settings, and will refuse to promote non-admin accounts.
 
 ### 2026-11-14 — Antigravity — B1-05
 - Did: Implemented authentication layer per PRD FR-1.1 and TASKS.md B1-05: `core/security.py` (Argon2id password hashing, JWT access token generation with HS256, secure refresh token generation and SHA-256 storage hash); `core/deps.py` (`get_current_user` Bearer dependency); `schemas/auth.py` (UserRegisterRequest with email validation, UserLoginRequest, TokenRefreshRequest, UserLogoutRequest, UserResponse, TokenResponse); `services/auth.py` (AuthService with register, login, refresh with rotation, logout with revocation); `api/v1/auth.py` (FastAPI router mounted at `/auth` and `/api/v1/auth` covering `/register`, `/login`, `/refresh`, `/logout`, `/me`); added unit tests in `test_security.py` and integration tests in `test_auth_api.py` covering happy paths, duplicate emails, inactive user blocking, invalid/expired tokens, and token rotation (44 total passing tests).

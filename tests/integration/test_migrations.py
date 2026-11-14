@@ -112,6 +112,7 @@ def test_alembic_upgrade_and_downgrade() -> None:
 
     finally:
         test_engine.dispose()
-        # Clean up database
+        # Clean up database and leave clean database ready
         with psycopg.connect(admin_conn_str, autocommit=True) as conn:
             conn.execute("DROP DATABASE IF EXISTS sma_test WITH (FORCE)")
+            conn.execute("CREATE DATABASE sma_test OWNER sma")

@@ -75,3 +75,15 @@ def get_current_user(
         )
 
     return user
+
+
+def require_admin(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Ensure the authenticated user holds the platform administrator role."""
+    if current_user.role != "admin":
+        raise ForbiddenError(
+            message="Administrator privileges required",
+            code="admin_required",
+        )
+    return current_user

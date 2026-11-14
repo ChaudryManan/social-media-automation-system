@@ -53,12 +53,7 @@ def _postgres_is_reachable(test_db_url: str) -> bool:
         return False
 
 
-# Setup test engine
-_test_url = _get_test_db_url()
-_reachable = _postgres_is_reachable(_test_url)
-
-if _reachable:
-    # Ensure test database exists
+def _ensure_test_database() -> None:
     _parsed = urlparse(_test_url)
     _admin_url = urlunparse(_parsed._replace(scheme="postgresql", path="/postgres"))
     with psycopg.connect(_admin_url, autocommit=True) as _admin_conn:
@@ -69,6 +64,13 @@ if _reachable:
         if not _res:
             _admin_conn.execute("CREATE DATABASE sma_test OWNER sma")
 
+
+# Setup test engine
+_test_url = _get_test_db_url()
+_reachable = _postgres_is_reachable(_test_url)
+
+if _reachable:
+    _ensure_test_database()
     _test_engine = sa.create_engine(_test_url, poolclass=sa.pool.NullPool)
     _TestingSessionLocal = sessionmaker(
         autocommit=False, autoflush=False, bind=_test_engine
@@ -84,6 +86,9 @@ def db() -> Generator[Session, None, None]:
     """Provide an isolated database session and truncate tables after each test."""
     if not _reachable or _test_engine is None or _TestingSessionLocal is None:
         pytest.skip("PostgreSQL is not reachable; skipping integration test.")
+
+    _ensure_test_database()
+    Base.metadata.create_all(bind=_test_engine)
 
     session = _TestingSessionLocal()
     try:
