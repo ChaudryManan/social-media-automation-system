@@ -1,6 +1,7 @@
 """Integration tests for the workspaces CRUD API (B1-08)."""
 
 import socket
+import threading
 import uuid
 from collections.abc import Generator
 from datetime import UTC, datetime
@@ -11,13 +12,19 @@ import pytest
 import sqlalchemy as sa
 from app.core.config import settings
 from app.core.db import get_db
+from app.core.errors import LimitExceededError
 from app.core.security import create_access_token
 from app.main import app
 from app.models import Base
+from app.models.audit import AuditLog
+from app.models.limits import UserLimits
+from app.models.settings import SystemSettings
 from app.models.users import User
 from app.models.workspaces import Workspace
+from app.schemas.workspaces import WorkspaceCreate
 from app.services.workspaces import WorkspaceService
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 
@@ -126,6 +133,20 @@ def _make_user(
     db.commit()
     token = create_access_token(subject=str(user.id), email=user.email, role=user.role)
     return user, {"Authorization": f"Bearer {token}"}
+
+
+def _set_limit(db: Session, user: User, max_workspaces: int | None) -> None:
+    """Give ``user`` a ``user_limits`` override for ``max_workspaces``."""
+    db.add(UserLimits(user_id=user.id, max_workspaces=max_workspaces))
+    db.commit()
+
+
+def _audit_rows(db: Session, action: str | None = None) -> list[AuditLog]:
+    db.expire_all()
+    stmt = select(AuditLog).order_by(AuditLog.created_at, AuditLog.action)
+    if action is not None:
+        stmt = stmt.where(AuditLog.action == action)
+    return list(db.scalars(stmt).all())
 
 
 def _create(client: TestClient, headers: dict[str, str], **payload: object) -> dict:
@@ -299,7 +320,8 @@ def test_list_returns_only_own_live_workspaces_newest_first(
 
 @pytest.mark.integration
 def test_list_pagination(client: TestClient, db: Session) -> None:
-    _, headers = _make_user(db, "owner@example.com")
+    owner, headers = _make_user(db, "owner@example.com")
+    _set_limit(db, owner, 10)  # this test needs more than the default 3
     ids = [_create(client, headers, name=f"WS {i}")["id"] for i in range(5)]
 
     page1 = client.get("/workspaces?limit=2&offset=0", headers=headers).json()
@@ -659,3 +681,292 @@ def test_routes_are_available_under_api_v1_prefix(
         ).status_code
         == 204
     )
+
+
+# --------------------------------------------------- limits (B1-09, FR-2a.4)
+
+
+@pytest.mark.integration
+def test_default_limit_blocks_workspace_number_limit_plus_one(
+    client: TestClient, db: Session
+) -> None:
+    _, headers = _make_user(db, "owner@example.com")
+    for i in range(3):  # code fallback default is 3 (no system_settings rows)
+        _create(client, headers, name=f"WS {i}")
+
+    response = client.post("/workspaces", json={"name": "WS 4"}, headers=headers)
+
+    assert response.status_code == 403
+    error = response.json()["error"]
+    assert error["code"] == "workspace_limit_reached"
+    assert "at most 3 workspaces" in error["message"]
+    assert error["details"] == {"limit": 3, "current": 3}
+    assert client.get("/workspaces", headers=headers).json()["total"] == 3
+
+
+@pytest.mark.integration
+def test_user_limit_override_raises_and_lowers_the_limit(
+    client: TestClient, db: Session
+) -> None:
+    high, high_headers = _make_user(db, "high@example.com")
+    low, low_headers = _make_user(db, "low@example.com")
+    _set_limit(db, high, 5)
+    _set_limit(db, low, 1)
+
+    for i in range(5):
+        _create(client, high_headers, name=f"H{i}")
+    _create(client, low_headers, name="L0")
+
+    over_high = client.post("/workspaces", json={"name": "H5"}, headers=high_headers)
+    over_low = client.post("/workspaces", json={"name": "L1"}, headers=low_headers)
+    assert over_high.status_code == over_low.status_code == 403
+    assert over_high.json()["error"]["details"] == {"limit": 5, "current": 5}
+    assert over_low.json()["error"]["details"] == {"limit": 1, "current": 1}
+
+
+@pytest.mark.integration
+def test_system_setting_default_applies_and_user_override_beats_it(
+    client: TestClient, db: Session
+) -> None:
+    db.add(SystemSettings(key="default_max_workspaces", value=1))
+    db.commit()
+    plain, plain_headers = _make_user(db, "plain@example.com")
+    special, special_headers = _make_user(db, "special@example.com")
+    _set_limit(db, special, 2)
+
+    _create(client, plain_headers, name="P0")
+    blocked = client.post("/workspaces", json={"name": "P1"}, headers=plain_headers)
+    _create(client, special_headers, name="S0")
+    _create(client, special_headers, name="S1")
+    special_blocked = client.post(
+        "/workspaces", json={"name": "S2"}, headers=special_headers
+    )
+
+    assert blocked.status_code == 403
+    assert blocked.json()["error"]["details"]["limit"] == 1
+    assert special_blocked.status_code == 403
+    assert special_blocked.json()["error"]["details"]["limit"] == 2
+
+
+@pytest.mark.integration
+def test_limit_zero_blocks_the_first_workspace(client: TestClient, db: Session) -> None:
+    user, headers = _make_user(db, "zero@example.com")
+    _set_limit(db, user, 0)
+
+    response = client.post("/workspaces", json={"name": "Nope"}, headers=headers)
+
+    assert response.status_code == 403
+    assert response.json()["error"]["details"] == {"limit": 0, "current": 0}
+
+
+@pytest.mark.integration
+def test_limit_is_per_user(client: TestClient, db: Session) -> None:
+    _, headers_a = _make_user(db, "a@example.com")
+    _, headers_b = _make_user(db, "b@example.com")
+    for i in range(3):
+        _create(client, headers_a, name=f"A{i}")
+
+    assert (
+        client.post("/workspaces", json={"name": "A3"}, headers=headers_a).status_code
+        == 403
+    )
+    _create(client, headers_b, name="B0")  # unaffected by A being at the limit
+
+
+@pytest.mark.integration
+def test_deleting_a_workspace_frees_a_slot(client: TestClient, db: Session) -> None:
+    user, headers = _make_user(db, "owner@example.com")
+    _set_limit(db, user, 1)
+    first = _create(client, headers, name="First")
+    assert (
+        client.post("/workspaces", json={"name": "Second"}, headers=headers).status_code
+        == 403
+    )
+
+    client.delete(f"/workspaces/{first['id']}?confirm=true", headers=headers)
+
+    _create(client, headers, name="Second")
+
+
+@pytest.mark.integration
+def test_limit_error_is_also_served_under_api_v1(
+    client: TestClient, db: Session
+) -> None:
+    user, headers = _make_user(db, "owner@example.com")
+    _set_limit(db, user, 0)
+
+    response = client.post("/api/v1/workspaces", json={"name": "X"}, headers=headers)
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "workspace_limit_reached"
+
+
+@pytest.mark.integration
+def test_concurrent_creates_cannot_exceed_the_limit(db: Session) -> None:
+    """Two simultaneous creates at limit 1: exactly one wins (row lock on user)."""
+    assert _TestingSessionLocal is not None
+    owner, _ = _make_user(db, "racer@example.com")
+    _set_limit(db, owner, 1)
+    owner_id = owner.id
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def attempt(name: str) -> None:
+        session = _TestingSessionLocal()
+        try:
+            user = session.get(User, owner_id)
+            barrier.wait(timeout=10)
+            WorkspaceService.create(session, user, WorkspaceCreate(name=name))
+            outcomes.append("created")
+        except LimitExceededError:
+            outcomes.append("limit")
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=attempt, args=(n,)) for n in ("One", "Two")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert sorted(outcomes) == ["created", "limit"]
+
+
+# ---------------------------------------------------------- audit (B1-09)
+
+
+@pytest.mark.integration
+def test_owner_delete_writes_audit_entry(client: TestClient, db: Session) -> None:
+    owner, headers = _make_user(db, "owner@example.com")
+    created = _create(client, headers, name="Doomed")
+
+    client.delete(f"/workspaces/{created['id']}?confirm=true", headers=headers)
+
+    rows = _audit_rows(db)
+    assert [r.action for r in rows] == ["workspace.delete"]
+    row = rows[0]
+    assert row.actor_id == owner.id
+    assert row.entity_type == "workspace"
+    assert row.entity_id == created["id"]
+    assert row.meta == {
+        "name": "Doomed",
+        "owner_id": str(owner.id),
+        "by_admin": False,
+    }
+
+
+@pytest.mark.integration
+def test_admin_delete_logs_access_and_delete_with_by_admin(
+    client: TestClient, db: Session
+) -> None:
+    owner, owner_headers = _make_user(db, "owner@example.com")
+    admin, admin_headers = _make_user(db, "admin@example.com", role="admin")
+    created = _create(client, owner_headers, name="Theirs")
+
+    client.delete(f"/workspaces/{created['id']}?confirm=true", headers=admin_headers)
+
+    deleted = _audit_rows(db, "workspace.delete")
+    accessed = _audit_rows(db, "workspace.admin_access")
+    assert len(deleted) == len(accessed) == 1
+    assert deleted[0].actor_id == admin.id
+    assert deleted[0].meta["by_admin"] is True
+    assert deleted[0].meta["owner_id"] == str(owner.id)
+    assert accessed[0].meta["method"] == "DELETE"
+
+
+@pytest.mark.integration
+def test_admin_get_of_other_users_workspace_is_audited(
+    client: TestClient, db: Session
+) -> None:
+    owner, owner_headers = _make_user(db, "owner@example.com")
+    admin, admin_headers = _make_user(db, "admin@example.com", role="admin")
+    created = _create(client, owner_headers)
+
+    response = client.get(f"/workspaces/{created['id']}", headers=admin_headers)
+
+    assert response.status_code == 200
+    rows = _audit_rows(db, "workspace.admin_access")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.actor_id == admin.id
+    assert row.entity_type == "workspace"
+    assert row.entity_id == created["id"]
+    assert row.meta == {
+        "owner_id": str(owner.id),
+        "method": "GET",
+        "path": f"/workspaces/{created['id']}",
+    }
+    assert row.ip_address
+
+
+@pytest.mark.integration
+def test_admin_update_of_other_users_workspace_is_audited(
+    client: TestClient, db: Session
+) -> None:
+    _, owner_headers = _make_user(db, "owner@example.com")
+    _, admin_headers = _make_user(db, "admin@example.com", role="admin")
+    created = _create(client, owner_headers)
+
+    client.patch(
+        f"/workspaces/{created['id']}", json={"name": "Renamed"}, headers=admin_headers
+    )
+
+    rows = _audit_rows(db, "workspace.admin_access")
+    assert [r.meta["method"] for r in rows] == ["PATCH"]
+
+
+@pytest.mark.integration
+def test_no_admin_audit_for_own_workspace_or_regular_users(
+    client: TestClient, db: Session
+) -> None:
+    _, owner_headers = _make_user(db, "owner@example.com")
+    _, admin_headers = _make_user(db, "admin@example.com", role="admin")
+    _, stranger_headers = _make_user(db, "stranger@example.com")
+    own = _create(client, owner_headers, name="Mine")
+    admin_own = _create(client, admin_headers, name="Admin's own")
+
+    client.get(f"/workspaces/{own['id']}", headers=owner_headers)
+    client.get(f"/workspaces/{admin_own['id']}", headers=admin_headers)
+    denied = client.get(f"/workspaces/{own['id']}", headers=stranger_headers)
+
+    assert denied.status_code == 404
+    assert _audit_rows(db) == []
+
+
+@pytest.mark.integration
+def test_admin_delete_without_confirm_logs_access_but_not_a_delete(
+    client: TestClient, db: Session
+) -> None:
+    _, owner_headers = _make_user(db, "owner@example.com")
+    _, admin_headers = _make_user(db, "admin@example.com", role="admin")
+    created = _create(client, owner_headers)
+
+    response = client.delete(f"/workspaces/{created['id']}", headers=admin_headers)
+
+    assert response.status_code == 400
+    assert len(_audit_rows(db, "workspace.admin_access")) == 1
+    assert _audit_rows(db, "workspace.delete") == []
+    db.expire_all()
+    assert db.get(Workspace, uuid.UUID(created["id"])).deleted_at is None
+
+
+@pytest.mark.integration
+def test_audit_entry_is_rolled_back_if_delete_fails(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delete audit row and the soft delete are one transaction."""
+    owner, _ = _make_user(db, "owner@example.com")
+    created = WorkspaceService.create(db, owner, WorkspaceCreate(name="Atomic"))
+
+    def boom() -> None:
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(db, "commit", boom)
+    with pytest.raises(RuntimeError):
+        WorkspaceService.soft_delete(db, created, owner)
+    monkeypatch.undo()
+    db.rollback()
+
+    assert _audit_rows(db) == []
+    db.expire_all()
+    assert db.get(Workspace, created.id).deleted_at is None

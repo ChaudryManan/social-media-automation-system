@@ -3,7 +3,7 @@
 from uuid import UUID
 
 import jwt
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -13,6 +13,7 @@ from app.core.errors import ForbiddenError, NotFoundError, UnauthorizedError
 from app.core.security import decode_access_token
 from app.models.users import User
 from app.models.workspaces import Workspace
+from app.services import audit
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -92,6 +93,7 @@ def require_admin(
 
 
 def get_workspace_for_user(
+    request: Request,
     workspace_id: UUID,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -100,6 +102,9 @@ def get_workspace_for_user(
 
     A workspace that does not exist, is soft-deleted, or belongs to someone else
     all produce the same 404, so ids of other users' workspaces are not revealed.
+
+    When an admin reaches a workspace they do not own, the access is written to
+    the audit log (``workspace.admin_access``) before the route runs.
     """
     workspace = db.scalar(
         select(Workspace).where(
@@ -114,4 +119,20 @@ def get_workspace_for_user(
             message="Workspace not found",
             code="workspace_not_found",
         )
+
+    if workspace.owner_id != current_user.id:
+        audit.log(
+            db,
+            current_user,
+            "workspace.admin_access",
+            "workspace",
+            workspace.id,
+            meta={
+                "owner_id": workspace.owner_id,
+                "method": request.method,
+                "path": request.url.path,
+            },
+            ip_address=request.client.host if request.client else None,
+        )
+        db.commit()
     return workspace

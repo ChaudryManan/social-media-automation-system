@@ -12,6 +12,7 @@ from app.core.errors import ConflictError
 from app.models.users import User
 from app.models.workspaces import Workspace
 from app.schemas.workspaces import WorkspaceCreate, WorkspaceUpdate
+from app.services import audit, usage
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,16 @@ class WorkspaceService:
 
     @staticmethod
     def create(db: Session, owner: User, data: WorkspaceCreate) -> Workspace:
-        """Create a workspace owned by ``owner``."""
+        """Create a workspace owned by ``owner``.
+
+        Raises ``LimitExceededError`` (403) when the owner already has their
+        effective ``max_workspaces`` live workspaces.
+        """
+        # Lock the owner row until commit so two concurrent creates cannot both
+        # pass the limit check (no-op on SQLite, which the unit tests may use).
+        db.scalar(select(User.id).where(User.id == owner.id).with_for_update())
+        usage.ensure_can_create_workspace(db, owner.id)
+
         if WorkspaceService._name_taken(db, owner.id, data.name):
             raise _name_conflict()
 
@@ -136,16 +146,30 @@ class WorkspaceService:
         return workspace
 
     @staticmethod
-    def soft_delete(db: Session, workspace: Workspace) -> None:
+    def soft_delete(db: Session, workspace: Workspace, actor: User) -> None:
         """Soft-delete a workspace (it disappears from every list and lookup).
+
+        The deletion is written to the audit log in the same transaction.
 
         When pipeline tables exist (B3), this must also cancel the workspace's
         pending scheduled jobs and non-final requests (DATABASE.md rule 7).
         """
         workspace.deleted_at = datetime.now(UTC)
+        audit.log(
+            db,
+            actor,
+            "workspace.delete",
+            "workspace",
+            workspace.id,
+            meta={
+                "name": workspace.name,
+                "owner_id": workspace.owner_id,
+                "by_admin": workspace.owner_id != actor.id,
+            },
+        )
         db.commit()
 
         logger.info(
             "Workspace deleted",
-            extra={"workspace_id": str(workspace.id)},
+            extra={"workspace_id": str(workspace.id), "user_id": str(actor.id)},
         )

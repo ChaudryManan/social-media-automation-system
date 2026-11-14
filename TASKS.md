@@ -30,7 +30,7 @@ Goal: runnable backend with auth, roles, workspaces and limits.
   **Done when:** test completes the reset flow using the console sender's captured token. **Dep:** B1-05.
 - [x] **B1-08 Workspaces CRUD** — create/list/get/update/soft-delete; fields per `DATABASE.md` 4.4; `get_workspace_for_user` ownership dependency (admin bypass); unique name per owner; delete requires `?confirm=true`. Refs: FR-1.4, FR-2a.1–3.
   **Done when:** user A cannot read/modify user B's workspace (404); soft-deleted workspaces disappear from lists. **Dep:** B1-06.
-- [ ] **B1-09 Limits and audit helper** — `services/usage.py` (effective limits = `user_limits` override else `system_settings` default); enforce `max_workspaces`; `services/audit.py::log(actor, action, entity, meta)`; log admin overrides and workspace deletes. Refs: FR-2a.4.
+- [x] **B1-09 Limits and audit helper** — `services/usage.py` (effective limits = `user_limits` override else `system_settings` default); enforce `max_workspaces`; `services/audit.py::log(actor, action, entity, meta)`; log admin overrides and workspace deletes. Refs: FR-2a.4.
   **Done when:** creating workspace number limit+1 returns a clear 4xx error. **Dep:** B1-08.
 - [ ] **B1-10 B1 test sweep and OpenAPI check** — coverage of auth/workspaces; `/docs` shows all routes with tags and examples.
   **Done when:** `make test` green; CI-style run from a clean clone works using README steps. **Dep:** B1-01…B1-09.
@@ -137,7 +137,7 @@ Goal: topic → video with voice and subtitles, per-scene retry, publish to a vi
 - [ ] **B5-02 Notification extras** — account-expired notifications, optional email sender interface wired (console default). Refs: FR-11.x.
 - [ ] **B5-03 Instagram publisher/collector** — (needs linked Facebook Page / business account per current rules). **Dep:** B3-13.
 - [ ] **B5-04 TikTok publisher/collector** — video posting per current API and audit status; if unavailable keep mock and document. **Dep:** B4-07.
-- [ ] **B5-05 Admin users API** — CRUD, suspend/activate, role change, limits (`PATCH /admin/users/{id}/limits`). Refs: FR-12.1. Audit logged.
+- [ ] **B5-05 Admin users API** — CRUD, suspend/activate, role change, limits (`PATCH /admin/users/{id}/limits`). Refs: FR-12.1. Audit logged (use `services/audit.log`; read/validate limits via `services/usage.py`).
 - [ ] **B5-06 Admin settings API** — `GET/PUT /admin/settings` with validation per key. Refs: FR-13.1.
 - [ ] **B5-07 Admin monitoring API** — workflows list/detail with agent steps, queue view, failure filters, health. Refs: FR-14.1.
 - [ ] **B5-08 Moderation** — `moderation_rules` migration + CRUD; wired into `validate_input` and `reviewer`; admin remove/block content and cancel/override scheduled requests. Refs: FR-15.1.

@@ -94,6 +94,8 @@ Also used for password reset tokens via a `purpose` column (`refresh` \| `passwo
 | monthly_generation_limit | int | |
 | updated_at | timestamptz | |
 
+Effective limits (B1-09, `services/usage.py`): per field, the user's non-null value wins, else the matching `system_settings` default (`default_max_workspaces`, `default_max_accounts_per_workspace`, `default_monthly_generation_limit`), else the code fallback (3 / 5 / 100). `0` is a valid limit (blocks creation); negative, non-integer or boolean values are ignored with a warning. Creating a workspace counts only live (not soft-deleted) workspaces and returns 403 `workspace_limit_reached` (`details: {limit, current}`) when `current >= limit`; the owner's `users` row is locked (`SELECT … FOR UPDATE`) during the check so concurrent creates cannot exceed the limit.
+
 ### 4.4 `workspaces`
 | Column | Type | Notes |
 |---|---|---|
@@ -336,8 +338,11 @@ Known keys (defaults live in code): `max_retries_default` (3), `max_retries_scen
 | action | text | e.g. `user.suspend`, `request.approve`, `settings.update` |
 | entity_type | text | |
 | entity_id | text | |
-| meta | jsonb | before/after, ip, etc. (no secrets) |
+| meta | jsonb | before/after, etc. (no secrets) |
+| ip_address | varchar(45) | client IP when known (column exists since `0001_initial_schema`) |
 | created_at | timestamptz | |
+
+Written only through `services/audit.py::log` (B1-09), which adds the row to the caller's session and does **not** commit, so the entry and the action it describes are one transaction. `meta` keys containing `password`, `secret`, `token`, `authorization`, `api_key` or `credential` are redacted. Actions written so far: `workspace.delete` (meta: `name`, `owner_id`, `by_admin`) and `workspace.admin_access` (an admin reached a workspace they do not own; meta: `owner_id`, `method`, `path`).
 
 ## 5. Indexes (minimum set)
 

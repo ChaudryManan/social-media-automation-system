@@ -7,10 +7,10 @@
 
 ## 1. NEXT ACTION (one precise step)
 
-> **Start task `B1-09` (Limits and audit helper) in `TASKS.md`.**
-> Add `services/usage.py` (effective limits = `user_limits` override, else `system_settings` default) and enforce `max_workspaces` when creating a workspace (hook into `WorkspaceService.create` / `POST /workspaces`, clear 4xx via `LimitExceededError`). Add `services/audit.py::log(actor, action, entity, meta)` and log workspace deletes (hook into `WorkspaceService.soft_delete`) and admin access to other users' workspaces. Refs: FR-2a.4. Done when creating workspace number limit+1 returns a clear 4xx error.
+> **Start task `B1-10` (B1 test sweep and OpenAPI check) in `TASKS.md`.**
+> Review test coverage of auth + workspaces (including the new limits/audit paths), make `/docs` show every route with tags, summaries and request/response examples (add `examples` to the schemas in `schemas/auth.py` and `schemas/workspaces.py` and `responses=` for the error cases), and verify a clean-clone run works from the README steps (`make test`, `make lint`, `make migrate`, `make seed`). Done when: `make test` is green and the README steps work from a fresh clone. Do not start B1-11 in the same change.
 
-Last updated: 2026-11-14 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B1-08: workspaces CRUD`
+Last updated: 2026-11-14 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B1-09: user limits and audit log helper`
 
 ## 2. How to resume (any agent)
 
@@ -24,7 +24,7 @@ Last updated: 2026-11-14 · Last agent: Claude (chat, via cloned repo) · Branch
 | Phase | Scope | Status | Done / Total |
 |---|---|---|---|
 | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
-| B1 | Foundation: auth, roles, workspaces, limits | In progress | 8 / 11 |
+| B1 | Foundation: auth, roles, workspaces, limits | In progress | 9 / 11 |
 | B2 | Agent engine (post flow) | Not started | 0 / 13 |
 | B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 18 |
 | B4 | Video flow | Not started | 0 / 10 |
@@ -43,6 +43,7 @@ Milestones:
 
 ## 5. Recently completed (newest first, keep last ~10)
 
+- 2026-11-14 — B1-09 completed: Limits and audit helper. `services/usage.py` (`get_effective_limits`: `user_limits` override, else `system_settings` default, else code fallback 3/5/100; `count_workspaces`; `ensure_can_create_workspace`), `services/audit.py::log` (adds an `audit_logs` row without committing; redacts sensitive `meta` keys). `WorkspaceService.create` locks the owner row and enforces `max_workspaces` (creating workspace number limit+1 gives 403 `workspace_limit_reached` with `details {limit, current}`); `WorkspaceService.soft_delete` now takes the actor and logs `workspace.delete` in the same transaction; `get_workspace_for_user` logs `workspace.admin_access` when an admin reaches someone else's workspace. 39 new tests (24 unit, 15 integration incl. a two-thread race test); full suite 208 passed.
 - 2026-11-14 — B1-08 completed: Workspaces CRUD. `POST/GET /workspaces`, `GET/PATCH/DELETE /workspaces/{id}` (dual-mounted with `/api/v1`), schemas with validation (`schemas/workspaces.py`: trimmed name, IANA timezone, language tag, platform list, settings size cap, unknown fields rejected), `WorkspaceService` (`services/workspaces.py`: case-insensitive unique name per owner with DB-index race fallback, paginated own-list, partial update that can clear nullable fields, soft delete), `get_workspace_for_user` dependency in `core/deps.py` (owner or admin; anything else is 404). Delete requires `?confirm=true`. 79 new tests (35 unit, 44 integration); full suite 169 passed.
 - 2026-11-14 — B1-07 completed: Password reset workflow. Implemented `/auth/forgot-password` and `/auth/reset-password` endpoints (dual-mounted with `/api/v1` prefix). Fixed-window rate limiting per-IP (5 / 10 min) and per-account (3 / 15 min) with 60s cooldown key via Redis (`core/ratelimit.py`), failing closed with HTTP 503 `ServiceUnavailableError`. Generic 200 response for forgot-password preventing account enumeration; single-use token semantics via `refresh_tokens` (`purpose='password_reset'`, `revoked_at`), row-level lock concurrency protection (`with_for_update()`), all active refresh tokens revoked upon reset. Added `BaseEmailSender` / `ConsoleEmailSender` (`providers/email.py`) dispatching reset URL without logging tokens. Full unit tests (21 tests in `test_password_reset_service.py`) and integration tests in `test_password_reset.py`.
 - 2026-11-14 — B1-06 completed: RBAC and admin seed. Implemented `require_admin` dependency (`core/deps.py`), admin router with dummy authorization test route (`api/v1/admin.py`), idempotent seeding service (`services/seed.py`) with secure environment credential validation and automatic user promotion protection, 12 canonical system settings without overwriting customizations, and `make seed` Makefile target. Full unit and integration test coverage (`test_rbac.py`, `test_seed_service.py`, `test_admin_seed.py`).
@@ -67,6 +68,11 @@ Milestones:
 
 | Date | ID | Decision | Why | Docs updated |
 |---|---|---|---|---|
+| 2026-11-14 | B1-09-1 | Exceeding `max_workspaces` returns HTTP 403 with code `workspace_limit_reached` and `details {limit, current}` (via the existing `LimitExceededError`, which defaults to 400 but accepts a status). | A quota is a policy refusal, not a malformed request (400), a conflict (409, used for duplicate names) or a retry-later case (429). The stable `code` lets clients tell it apart from a permissions 403. | ARCHITECTURE.md, DATABASE.md |
+| 2026-11-14 | B1-09-2 | Effective limit per field: user's non-null `user_limits` value, else `system_settings.default_*`, else code fallback (`FALLBACK_DEFAULTS` in `services/usage.py`, equal to the seeded values; a unit test keeps them in sync). `0` is valid; negative/non-int/bool values are ignored with a warning. | DATABASE.md 4.17 says defaults live in code; a missing or corrupted setting must not disable quotas. | DATABASE.md |
+| 2026-11-14 | B1-09-3 | `audit.log(db, actor, action, entity_type, entity_id, meta, ip_address)` only adds the row (no commit) and redacts sensitive `meta` keys. The signature differs slightly from the sketch in TASKS (`db` explicit, `entity` split in two) to fit the sync-session style of the other services. It fills the existing `audit_logs.ip_address` column. | Entry and action commit atomically (tested); secrets can never reach the audit trail. | DATABASE.md |
+| 2026-11-14 | B1-09-4 | Admin access to another user's workspace is audited inside `get_workspace_for_user` (`workspace.admin_access`, meta `owner_id`/`method`/`path`) for every method, including GET, and is committed there. `core/deps.py` therefore imports `services/audit`. | One choke point covers every present and future workspace-scoped route (ARCHITECTURE.md: "admin bypass explicit and audited"); a GET would otherwise lose the row on rollback. | ARCHITECTURE.md |
+| 2026-11-14 | B1-09-5 | `WorkspaceService.create` runs `SELECT … FOR UPDATE` on the owner's `users` row before counting. `soft_delete(db, workspace, actor)` gained the `actor` argument. | Without the lock two simultaneous creates both pass the count check (the race test fails 3/3 without it). | DATABASE.md |
 | 2026-11-14 | B1-08-1 | Workspace name uniqueness per owner is checked case-insensitively in the service (among non-deleted rows); the DB partial unique index stays case-sensitive as the race guard (IntegrityError maps to the same 409 `workspace_name_taken`). | "Brand" vs "brand" is confusing for users; no migration needed. | DATABASE.md |
 | 2026-11-14 | B1-08-2 | A workspace that is missing, soft-deleted, or owned by someone else returns the same 404 `workspace_not_found` (admins may access any live workspace). `GET /workspaces` always lists only the caller's own workspaces, even for admins (an admin-wide list is `GET /admin/workspaces` in B5-10). | Does not reveal which ids exist; keeps the admin list task separate. | ARCHITECTURE.md |
 | 2026-11-14 | B1-08-3 | Create/update schemas use `extra="forbid"`: `owner_id`, `is_suspended` and other unknown fields give 422 instead of being silently ignored. Delete without `?confirm=true` gives 400 `confirmation_required` (checked after authorization). | Prevents privilege/ownership tampering; makes API misuse visible. | DATABASE.md, ARCHITECTURE.md |
@@ -88,6 +94,8 @@ Milestones:
 ## 8. Known issues, blockers, open questions
 
 **Known issues / tech debt:**
+- Every admin request to another user's workspace writes an `audit_logs` row (reads included, B1-09-4). Acceptable for v1 volumes; if admin browsing grows, consider sampling reads or a retention job.
+- `max_accounts_per_workspace` and `monthly_generation_limit` are already resolved by `usage.get_effective_limits` but are enforced only later (B3-02 for accounts, B3-05 for requests). Changing limits by an admin (`PATCH /admin/users/{id}/limits`, B5-05) must call `audit.log`.
 - The Dockerfile installs a pinned list of runtime packages by hand (including `tzdata` since B1-08). Any task that adds a runtime dependency must also update the Dockerfile, then rebuild the image with `docker compose build api`.
 - Pending hook (B3-06): `WorkspaceService.soft_delete` must cancel the workspace's pending jobs and non-final requests once those tables exist (`DATABASE.md` section 6 rule 7). The reminder is in the B3-06 task text.
 - Worker and Beat healthchecks are simple Redis pings until the Celery app exists in B3-06.
@@ -111,6 +119,17 @@ Template — copy for each session:
 - Next: <the precise next action — also copied to section 1>
 - Watch out: <gotchas, flaky tests, decisions the next agent must know>
 ```
+
+### 2026-11-14 — Claude (chat, cloned the public repo) — B1-09
+- Did: Implemented limits and audit helper (FR-2a.4):
+  - `services/usage.py` (effective limits, workspace count, `ensure_can_create_workspace` raising `LimitExceededError` 403 `workspace_limit_reached`), `services/audit.py::log` (no commit, redacts secrets).
+  - `WorkspaceService.create` locks the owner row and enforces `max_workspaces`; `soft_delete(db, workspace, actor)` writes `workspace.delete`; `get_workspace_for_user` writes `workspace.admin_access` for admins on other users' workspaces; `api/v1/workspaces.py` passes the actor and documents 403/409 in OpenAPI.
+  - No migration: `user_limits`, `system_settings` and `audit_logs` (incl. `ip_address`) already exist from `0001_initial_schema`.
+  - Docs updated: `TASKS.md` (B1-09 ticked, B5-05 hint), `DATABASE.md` (4.3, 4.19), `ARCHITECTURE.md` (Workspaces API row), this file.
+- State: `ruff check` clean; full suite 208 passed (169 before + 24 unit + 15 integration) against PostgreSQL 16 on port 15432 and Redis. Race test verified to fail without the row lock. `ruff format --check` still flags the same two pre-existing files (`services/seed.py`, `tests/integration/test_admin_seed.py`), left untouched. Docker was not run. Branch `main`, last commit `B1-09: user limits and audit log helper`.
+- Left undone: nothing for B1-09.
+- Next: start `B1-10` (B1 test sweep and OpenAPI check).
+- Watch out: a user can now hold at most 3 workspaces by default (`default_max_workspaces`), so any test that creates more per user must set a `user_limits` override (see `_set_limit` in `tests/integration/test_workspaces_api.py`; `test_list_pagination` needed it). Integration tests run in the sandbox only when Postgres is reachable; they skip otherwise.
 
 ### 2026-11-14 — Claude (chat, cloned the public repo) — B1-08
 - Did: Implemented Workspaces CRUD (FR-1.4, FR-2a.1–3):

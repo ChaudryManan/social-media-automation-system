@@ -24,6 +24,14 @@ router = APIRouter(prefix="/workspaces", tags=["workspaces"])
     response_model=WorkspaceResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a workspace",
+    responses={
+        403: {
+            "description": (
+                "Workspace limit reached (error code `workspace_limit_reached`)."
+            )
+        },
+        409: {"description": "You already have a workspace with this name."},
+    },
 )
 def create_workspace(
     payload: WorkspaceCreate,
@@ -98,6 +106,7 @@ def delete_workspace(
     ),
     workspace: Workspace = Depends(get_workspace_for_user),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> Response:
     """Soft-delete a workspace. Requires ``?confirm=true``."""
     if not confirm:
@@ -107,5 +116,5 @@ def delete_workspace(
             http_status=status.HTTP_400_BAD_REQUEST,
             details={"hint": "Repeat the request with ?confirm=true"},
         )
-    WorkspaceService.soft_delete(db=db, workspace=workspace)
+    WorkspaceService.soft_delete(db=db, workspace=workspace, actor=current_user)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
