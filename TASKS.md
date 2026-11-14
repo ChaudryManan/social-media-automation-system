@@ -20,7 +20,7 @@ Goal: runnable backend with auth, roles, workspaces and limits.
   **Done when:** `docker compose up` starts all; `/health/ready` returns 200. **Dep:** B1-01.
 - [x] **B1-03 Core infrastructure** — `core/config.py` (pydantic-settings), structured JSON logging with request id middleware, `AppError` hierarchy + global handler producing the standard error format, CORS from env.
   **Done when:** a test hits an endpoint that raises `AppError` and gets `{error:{code,message,details}}`. **Dep:** B1-01.
-- [ ] **B1-04 Database and first migration** — SQLAlchemy base/session (`core/db.py`), Alembic setup; migration for `users`, `refresh_tokens`, `user_limits`, `workspaces`, `audit_logs`, `system_settings` per `DATABASE.md`. Decide enum strategy (PG enum vs text+CHECK) and record it in `PROGRESS.md` Decisions.
+- [x] **B1-04 Database and first migration** — SQLAlchemy base/session (`core/db.py`), Alembic setup; migration for `users`, `refresh_tokens`, `user_limits`, `workspaces`, `audit_logs`, `system_settings` per `DATABASE.md`. Decide enum strategy (PG enum vs text+CHECK) and record it in `PROGRESS.md` Decisions.
   **Done when:** `make migrate` on an empty DB creates the tables; downgrade works. **Dep:** B1-02, B1-03.
 - [ ] **B1-05 Auth endpoints** — register, login, refresh, logout, `GET /auth/me`; password hashing; JWT access + hashed refresh tokens; inactive users blocked. Refs: FR-1.1.
   **Done when:** tests cover register→login→me→refresh→logout and wrong-password/inactive cases. **Dep:** B1-04.
@@ -34,6 +34,8 @@ Goal: runnable backend with auth, roles, workspaces and limits.
   **Done when:** creating workspace number limit+1 returns a clear 4xx error. **Dep:** B1-08.
 - [ ] **B1-10 B1 test sweep and OpenAPI check** — coverage of auth/workspaces; `/docs` shows all routes with tags and examples.
   **Done when:** `make test` green; CI-style run from a clean clone works using README steps. **Dep:** B1-01…B1-09.
+- [ ] **B1-11 Uvicorn access logs in JSON with request id** — Configure Uvicorn / middleware so that API access logs are emitted as JSON lines that include request_id (e.g. disable Uvicorn's default access log and emit one structured line per request from middleware).
+  **Done when:** the API container's access logs are JSON lines that include request_id. **Dep:** B1-03.
 
 ## Phase B2 — Agent engine, post flow (M6, M7)
 

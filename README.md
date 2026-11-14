@@ -10,5 +10,11 @@
    available at `http://localhost:8000`; use `/health` for liveness and
    `/health/ready` for database and Redis readiness.
 
-Docker Desktop with WSL2 is required for the development stack. Database migrations
-and admin seeding are introduced by their respective later tasks.
+Docker Desktop with WSL2 is required for the development stack.
+
+### Database Connectivity & Migrations
+- **Host machine (local development / Alembic / tests):** PostgreSQL is published on `127.0.0.1:15432` (host port 15432 is used because port 5432 is reserved/in-use on this machine). Use `DATABASE_URL=postgresql+psycopg://sma:sma@127.0.0.1:15432/sma` and `TEST_DATABASE_URL=postgresql+psycopg://sma:sma@127.0.0.1:15432/sma_test`.
+- **Inside Docker Compose:** services communicate via the Docker network where the database host is `postgres` (`postgresql+psycopg://sma:sma@postgres:5432/sma`).
+- Run `make migrate` to apply Alembic migrations against the database.
+- Run `make downgrade` to roll back one migration step.
+- Run `make migration m="message"` to create a new revision.

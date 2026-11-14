@@ -19,7 +19,8 @@ class Settings(BaseSettings):
 
     # Core environment
     ENVIRONMENT: str = "development"
-    DATABASE_URL: str = "postgresql+psycopg://sma:sma@localhost:5432/sma"
+    DATABASE_URL: str = "postgresql+psycopg://sma:sma@127.0.0.1:15432/sma"
+    TEST_DATABASE_URL: str = "postgresql+psycopg://sma:sma@127.0.0.1:15432/sma_test"
     REDIS_URL: str = "redis://localhost:6379/0"
     SECRET_KEY: str = "change-me"
     ACCESS_TOKEN_MINUTES: int = 30

@@ -7,11 +7,10 @@ else
 VENV_PYTHON := $(VENV)/bin/python
 endif
 
-.PHONY: dev test lint format migrate seed venv
+.PHONY: dev test lint format migrate downgrade migration seed venv
 
 $(VENV_STAMP): pyproject.toml
 	py -3.13 -m venv $(VENV)
-	$(VENV_PYTHON) -m pip install --upgrade pip
 	$(VENV_PYTHON) -m pip install -e ".[dev]"
 	$(VENV_PYTHON) -c "from pathlib import Path; Path('$(VENV_STAMP)').touch()"
 
@@ -30,7 +29,13 @@ format: venv
 	$(VENV_PYTHON) -m ruff format backend tests
 
 migrate: venv
-	@echo "B1-04 will add Alembic migrations."
+	$(VENV_PYTHON) -m alembic upgrade head
+
+downgrade: venv
+	$(VENV_PYTHON) -m alembic downgrade -1
+
+migration: venv
+	$(VENV_PYTHON) -m alembic revision --autogenerate -m "$(m)"
 
 seed: venv
 	@echo "B1-06 will add the idempotent admin seed command."

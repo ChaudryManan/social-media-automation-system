@@ -9,7 +9,8 @@
 
 - Primary keys: `id UUID` (generated app-side, `uuid4`), unless noted.
 - Timestamps: `timestamptz`, stored in **UTC**. Every table has `created_at`; mutable tables also have `updated_at`.
-- Enums: implemented as PostgreSQL enums or `text` + CHECK (pick one in B1-04 and stay consistent). Values listed below are the contract.
+- Enums: implemented as `text` columns with CHECK constraints (SQLAlchemy `Enum(native_enum=False, create_constraint=True)`). Do NOT use native PostgreSQL enums.
+- Email: do NOT use `citext`. Store emails strictly lowercased in the application and enforce uniqueness with a unique functional index on `lower(email)`.
 - Soft delete only where stated (`deleted_at`). Foreign keys use `ON DELETE` as stated.
 - Secrets (tokens) stored **encrypted** (`*_enc` columns, Fernet). Never plaintext.
 - Names: `snake_case`, plural table names.
@@ -86,7 +87,8 @@ Also used for password reset tokens via a `purpose` column (`refresh` \| `passwo
 ### 4.3 `user_limits`
 | Column | Type | Notes |
 |---|---|---|
-| user_id | uuid | PK, FK users ON DELETE CASCADE |
+| id | uuid | PK |
+| user_id | uuid | UNIQUE, FK users ON DELETE CASCADE |
 | max_workspaces | int | default from system_settings if null |
 | max_accounts_per_workspace | int | |
 | monthly_generation_limit | int | |

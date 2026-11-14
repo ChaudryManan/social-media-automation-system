@@ -7,10 +7,10 @@
 
 ## 1. NEXT ACTION (one precise step)
 
-> **Start task `B1-04` (Database and first migration) in `TASKS.md`.**
-> Add SQLAlchemy base/session (`core/db.py`), Alembic setup, initial migrations for core tables per `DATABASE.md`, and decide the enum strategy.
+> **Start task `B1-05` (Auth endpoints) in `TASKS.md`.**
+> Implement register, login, refresh, logout, GET /auth/me, password hashing, JWT access tokens, and hashed refresh tokens per `PRD.md` FR-1.1 and `DATABASE.md` 4.1-4.2.
 
-Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last commit: `B1-03: config, logging and error handling`
+Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last commit: `B1-04: database and first migration`
 
 ## 2. How to resume (any agent)
 
@@ -24,7 +24,7 @@ Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last co
 | Phase | Scope | Status | Done / Total |
 |---|---|---|---|
 | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
-| B1 | Foundation: auth, roles, workspaces, limits | In progress | 3 / 10 |
+| B1 | Foundation: auth, roles, workspaces, limits | In progress | 4 / 11 |
 | B2 | Agent engine (post flow) | Not started | 0 / 13 |
 | B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 18 |
 | B4 | Video flow | Not started | 0 / 10 |
@@ -43,6 +43,7 @@ Milestones:
 
 ## 5. Recently completed (newest first, keep last ~10)
 
+- 2026-11-14 — B1-04 completed: Database and first migration. Added SQLAlchemy 2.0 sync engine + Base + session dependency (`core/db.py`), 6 foundation models (`users`, `refresh_tokens`, `user_limits`, `workspaces`, `audit_logs`, `system_settings`), Alembic configuration and initial migration (`0001_initial_schema`), `make migrate`/`downgrade`/`migration` targets, model unit tests and migration upgrade/downgrade integration test (23 tests total passing). Resolved host IPv6 port resolution delay by standardizing on `127.0.0.1:15432`.
 - 2026-11-14 — B1-03 completed: Core infrastructure with typed pydantic-settings, structured JSON logging with request-ID propagation, AppError hierarchy with global exception handlers (including 422 mapping), and CORS middleware.
 - 2026-11-13 — B1-02 completed: Compose services and healthchecks, minimal FastAPI liveness/readiness endpoints, health tests, and Windows-friendly first-start timing.
 - 2026-11-13 — B1-01 completed: repository package scaffold, pinned Python tooling, project-local `.venv` Make targets, environment template, and placeholder test.
@@ -56,11 +57,14 @@ Milestones:
 - Local run: `docker compose up` (after B1-02). Tests: `make test` (offline, fake LLM, mock publisher).
 - Default dev env values: `LLM_PROVIDER=fake`, `PUBLISHER_MODE=mock`, fake image/video/TTS/search providers.
 - Windows: GNU Make 4.4.1 installed via winget; `make` creates and uses the project-local `.venv` with Python 3.13. Docker Desktop with WSL2 is required from B1-02.
+- Environment notes: Host port 5432 is blocked on this Windows machine (reserved/in-use by a local PostgreSQL service PID 4980), so Postgres is published on 127.0.0.1:15432 for host-side development (`postgresql+psycopg://sma:sma@127.0.0.1:15432/sma`). Never connect to port 5432 on the host machine. Always use IPv4 `127.0.0.1` rather than `localhost` to avoid Windows IPv6 resolution latency. Test database URL is configurable via `TEST_DATABASE_URL` (default `postgresql+psycopg://sma:sma@127.0.0.1:15432/sma_test`). Inside Docker Compose, the database host remains `postgres:5432`.
 
 ## 7. Decisions log (append-only; newest first)
 
 | Date | ID | Decision | Why | Docs updated |
 |---|---|---|---|---|
+| 2026-11-14 | B1-04-1 | Use text columns with CHECK constraints (`SQLAlchemy Enum(native_enum=False, create_constraint=True)`) instead of native Postgres enums for `user_role` and `token_purpose`. | Avoids PostgreSQL `ALTER TYPE` migration complexities and keeps enums portable and easy to maintain. | DATABASE.md, backend/app/models |
+| 2026-11-14 | B1-04-2 | Store emails lowercased in application code and enforce uniqueness via a unique functional index on `lower(email)` instead of using `citext`. | Avoids requiring PostgreSQL `citext` extension while guaranteeing strict case-insensitive uniqueness. | DATABASE.md, backend/app/models |
 | 2026-11-13 | B1-02 | Use generous first-start healthcheck windows: PostgreSQL gets a 120 s start period and 30 retries; Redis 30 s/20; API 60 s/20; worker and beat 30 s. | A fresh Windows Docker Desktop machine can initialize PostgreSQL and build/start the application slowly. | docker-compose |
 | 2026-11-13 | B1-02 | Build one shared `social-media-automation:dev` application image for `api`, `worker`, and `beat`; install only their currently needed pinned runtime packages in the B1 image. | Avoids three concurrent identical builds and the unused future LangGraph stack during this minimal foundation task. | Dockerfile, docker-compose |
 | 2026-11-13 | B1-01 | Keep `pyproject.toml` and `tests/` at the repository root, rather than under `backend/`. | This matches the established scaffold and lets project tooling discover them from the root. | ARCHITECTURE |
@@ -95,6 +99,13 @@ Template — copy for each session:
 - Next: <the precise next action — also copied to section 1>
 - Watch out: <gotchas, flaky tests, decisions the next agent must know>
 ```
+
+### 2026-11-14 — Antigravity — B1-04
+- Did: Implemented SQLAlchemy 2.0 Base, engine, and session management (`core/db.py`); created 6 foundation ORM models (`users`, `refresh_tokens`, `user_limits`, `workspaces`, `audit_logs`, `system_settings`) with text CHECK enums, email lowercasing validator, and partial unique indexes; configured Alembic (`alembic.ini`, `backend/alembic/env.py`) with initial migration `0001_initial_schema`; added `make migrate`/`downgrade`/`migration` targets; added unit tests (`test_models.py`) and migration upgrade/downgrade integration test (`test_migrations.py`); identified and resolved Windows IPv6 resolution latency by standardizing on `127.0.0.1:15432`; added FK index on `refresh_tokens.user_id` and aligned `user_limits` documentation.
+- State: tests pass (23 passed, 1 third-party deprecation warning, ~13s execution), lint clean (`make lint`), branch `main`.
+- Left undone: nothing for B1-04.
+- Next: start task B1-05 (Auth endpoints) in `TASKS.md`: register, login, refresh, logout, GET /auth/me; password hashing; JWT access tokens; hashed refresh tokens.
+- Watch out: Host port 5432 is in-use on this machine; Docker publishes Postgres on 127.0.0.1:15432. Always use 127.0.0.1 (not localhost) for host connections. When adding runtime dependencies, remember to update Dockerfile.
 
 ### 2026-11-14 — Antigravity — B1-03
 - Did: Implemented `core/config.py` using `pydantic-settings` with environment overrides and CORS parsing; added structured JSON logging and `RequestIDMiddleware` (`X-Request-ID` extraction/generation and context propagation); added `AppError` hierarchy and global exception handlers for `AppError`, `RequestValidationError`, `HTTPException`, and unhandled errors; configured CORS middleware; synced runtime dependencies in `Dockerfile`; added unit tests for config, error handling, and middleware (16 passing tests total).
