@@ -7,10 +7,10 @@
 
 ## 1. NEXT ACTION (one precise step)
 
-> **Start task `B1-07` (Password reset) in `TASKS.md`.**
-> Implement `forgot-password` and `reset-password` endpoints with single-use expiring token; add email sender interface with console implementation per `PRD.md` FR-1.2 and `DATABASE.md` 4.2.
+> **Start task `B1-08` (Workspaces CRUD) in `TASKS.md`.**
+> Implement create/list/get/update/soft-delete for workspaces per `DATABASE.md` 4.4 and `PRD.md` FR-1.4 / FR-2a.1–3, with ownership dependency `get_workspace_for_user` (admin bypass), unique name per owner, and `?confirm=true` required for deletion.
 
-Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last commit: `B1-06: rbac, admin dependency and seed command`
+Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last commit: `B1-07: implement secure password reset`
 
 ## 2. How to resume (any agent)
 
@@ -24,7 +24,7 @@ Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last co
 | Phase | Scope | Status | Done / Total |
 |---|---|---|---|
 | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
-| B1 | Foundation: auth, roles, workspaces, limits | In progress | 6 / 11 |
+| B1 | Foundation: auth, roles, workspaces, limits | In progress | 7 / 11 |
 | B2 | Agent engine (post flow) | Not started | 0 / 13 |
 | B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 18 |
 | B4 | Video flow | Not started | 0 / 10 |
@@ -43,6 +43,7 @@ Milestones:
 
 ## 5. Recently completed (newest first, keep last ~10)
 
+- 2026-11-14 — B1-07 completed: Password reset workflow. Implemented `/auth/forgot-password` and `/auth/reset-password` endpoints (dual-mounted with `/api/v1` prefix). Fixed-window rate limiting per-IP (5 / 10 min) and per-account (3 / 15 min) with 60s cooldown key via Redis (`core/ratelimit.py`), failing closed with HTTP 503 `ServiceUnavailableError`. Generic 200 response for forgot-password preventing account enumeration; single-use token semantics via `refresh_tokens` (`purpose='password_reset'`, `revoked_at`), row-level lock concurrency protection (`with_for_update()`), all active refresh tokens revoked upon reset. Added `BaseEmailSender` / `ConsoleEmailSender` (`providers/email.py`) dispatching reset URL without logging tokens. Full unit tests (21 tests in `test_password_reset_service.py`) and integration tests in `test_password_reset.py`.
 - 2026-11-14 — B1-06 completed: RBAC and admin seed. Implemented `require_admin` dependency (`core/deps.py`), admin router with dummy authorization test route (`api/v1/admin.py`), idempotent seeding service (`services/seed.py`) with secure environment credential validation and automatic user promotion protection, 12 canonical system settings without overwriting customizations, and `make seed` Makefile target. Full unit and integration test coverage (`test_rbac.py`, `test_seed_service.py`, `test_admin_seed.py`).
 - 2026-11-14 — B1-05 completed: Auth endpoints. Implemented Argon2id password hashing and PyJWT access token generation (`core/security.py`), bearer token auth dependency (`core/deps.py`), Pydantic schemas (`schemas/auth.py`), service layer (`services/auth.py`), and FastAPI routes (`api/v1/auth.py`) for `/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, and `/auth/me` (with dual `/api/v1/auth` mounting). Enforced inactive user blocks, case-insensitive email uniqueness, and token rotation. Full unit and integration test coverage (44 passing tests).
 - 2026-11-14 — B1-04 completed: Database and first migration. Added SQLAlchemy 2.0 sync engine + Base + session dependency (`core/db.py`), 6 foundation models (`users`, `refresh_tokens`, `user_limits`, `workspaces`, `audit_logs`, `system_settings`), Alembic configuration and initial migration (`0001_initial_schema`), `make migrate`/`downgrade`/`migration` targets, model unit tests and migration upgrade/downgrade integration test (23 tests total passing). Resolved host IPv6 port resolution delay by standardizing on `127.0.0.1:15432`.
@@ -65,6 +66,9 @@ Milestones:
 
 | Date | ID | Decision | Why | Docs updated |
 |---|---|---|---|---|
+| 2026-11-14 | B1-07-1 | Use Redis fixed-window rate limiter with per-IP (5 / 10m) and per-account (3 / 15m) counters plus a 60-second cooldown key (`SET NX EX 60`), failing closed with HTTP 503 `ServiceUnavailableError` when Redis is unreachable. | Prevents request flooding and account enumeration while strictly protecting the service against Redis outages. | PROGRESS.md, app/core/ratelimit.py |
+| 2026-11-14 | B1-07-2 | Reuse `refresh_tokens` table for password-reset tokens (`purpose='password_reset'`, `revoked_at` for single-use, `expires_at` for TTL, `SELECT … FOR UPDATE` row-level lock concurrency protection) without adding a new database migration. | Existing migration `0001_initial_schema` already created `purpose` with CHECK constraint `('refresh', 'password_reset')` and `revoked_at` column. | DATABASE.md, app/services/auth.py |
+| 2026-11-14 | B1-07-3 | On successful password reset, revoke all active refresh tokens for the account. Note: stateless JWT access tokens remain valid until expiration (`ACCESS_TOKEN_MINUTES=30`). | Standard security practice forcing re-login across devices; access tokens expire naturally due to short lifetime. | PROGRESS.md, app/services/auth.py |
 | 2026-11-14 | B1-04-1 | Use text columns with CHECK constraints (`SQLAlchemy Enum(native_enum=False, create_constraint=True)`) instead of native Postgres enums for `user_role` and `token_purpose`. | Avoids PostgreSQL `ALTER TYPE` migration complexities and keeps enums portable and easy to maintain. | DATABASE.md, backend/app/models |
 | 2026-11-14 | B1-04-2 | Store emails lowercased in application code and enforce uniqueness via a unique functional index on `lower(email)` instead of using `citext`. | Avoids requiring PostgreSQL `citext` extension while guaranteeing strict case-insensitive uniqueness. | DATABASE.md, backend/app/models |
 | 2026-11-13 | B1-02 | Use generous first-start healthcheck windows: PostgreSQL gets a 120 s start period and 30 retries; Redis 30 s/20; API 60 s/20; worker and beat 30 s. | A fresh Windows Docker Desktop machine can initialize PostgreSQL and build/start the application slowly. | docker-compose |
@@ -101,6 +105,21 @@ Template — copy for each session:
 - Next: <the precise next action — also copied to section 1>
 - Watch out: <gotchas, flaky tests, decisions the next agent must know>
 ```
+
+### 2026-11-14 — Antigravity — B1-07
+- Did: Implemented Password Reset workflow per PRD FR-1.2 and TASKS.md B1-07:
+  - Added `RateLimitError` (HTTP 429) and `ServiceUnavailableError` (HTTP 503) in `core/errors.py`.
+  - Added password reset settings and rate-limiting limits in `core/config.py` and `.env.example`.
+  - Created `core/ratelimit.py` with Redis-backed fixed-window rate limiter enforcing per-IP limit (5/10 min), per-account limit (3/15 min with SHA-256 hashed email key), and per-account 60s cooldown key (`SET NX EX 60`), failing closed with HTTP 503 if Redis is unreachable.
+  - Created `providers/email.py` with `BaseEmailSender` interface and `ConsoleEmailSender` development provider that prints reset URLs to console without logging tokens.
+  - Added `ForgotPasswordRequest` and `ResetPasswordRequest` in `schemas/auth.py`.
+  - Added `forgot_password()` and `reset_password()` in `services/auth.py`: generic 200 response on forgot-password to prevent account enumeration, revoking previous reset tokens, committing token before email dispatch, `SELECT … FOR UPDATE` row locking to ensure atomic single-use consumption, Argon2 hashing for new password, and revoking all active refresh tokens for the user upon reset. Handled timezone-aware comparison for SQLite and PostgreSQL compatibility.
+  - Added `POST /auth/forgot-password` and `POST /auth/reset-password` endpoints in `api/v1/auth.py` (dual-mounted at root and `/api/v1`).
+  - Added unit tests in `tests/unit/test_password_reset_service.py` (21 tests, all passing) and integration tests in `tests/integration/test_password_reset.py` covering rate limits, cooldown, single use, refresh token revocation, concurrent requests, and dual route mounting.
+- State: tests pass (57 passed, 32 skipped offline when PostgreSQL is not running), lint clean (`make lint`), branch `main`.
+- Left undone: nothing for B1-07. Ready for user commit approval.
+- Next: start task B1-08 (Workspaces CRUD) in `TASKS.md`: implement workspace model CRUD endpoints with ownership dependency `get_workspace_for_user`.
+- Watch out: Stateless JWT access tokens issued prior to password reset remain valid until natural expiration (`ACCESS_TOKEN_MINUTES=30`); refresh tokens are revoked immediately.
 
 ### 2026-11-14 — Antigravity — B1-06
 - Did: Implemented RBAC and admin seeding per PRD FR-1.3 and TASKS.md B1-06:

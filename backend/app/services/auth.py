@@ -18,6 +18,7 @@ from app.core.security import (
 from app.models.limits import UserLimits
 from app.models.tokens import RefreshToken
 from app.models.users import User
+from app.providers.email import BaseEmailSender, get_email_sender
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +161,10 @@ class AuthService:
             )
 
         now = datetime.now(UTC)
-        if token_row.expires_at <= now:
+        expires_at = token_row.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if expires_at <= now:
             raise UnauthorizedError(
                 message="Refresh token has expired",
                 code="token_expired",
@@ -230,3 +234,178 @@ class AuthService:
                 "Refresh token revoked on logout",
                 extra={"user_id": str(token_row.user_id)},
             )
+
+    # -----------------------------------------------------------------
+    # Password reset
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def forgot_password(
+        db: Session,
+        email: str,
+        email_sender: BaseEmailSender | None = None,
+    ) -> None:
+        """Initiate a password-reset flow for the given email address.
+
+        Always returns without revealing whether the account exists.
+        The reset token is committed to the database before email dispatch
+        so a delivery failure does not roll back the token.
+
+        Args:
+            db: Database session.
+            email: Normalised (lowercase) email from the request schema.
+            email_sender: Injectable email sender (defaults to configured provider).
+        """
+        if email_sender is None:
+            email_sender = get_email_sender()
+
+        clean_email = email.strip().lower()
+        now = datetime.now(UTC)
+
+        user = db.scalar(select(User).where(func.lower(User.email) == clean_email))
+        if user is None:
+            # Return silently — do not reveal account existence.
+            logger.info(
+                "Password-reset requested for unknown email (no action taken)",
+                extra={},  # deliberately no email in log
+            )
+            return
+
+        # Revoke all existing unused password-reset tokens for this user
+        # so only one live reset token exists at a time.
+        existing_tokens = db.scalars(
+            select(RefreshToken).where(
+                RefreshToken.user_id == user.id,
+                RefreshToken.purpose == "password_reset",
+                RefreshToken.revoked_at.is_(None),
+            )
+        ).all()
+        for tok in existing_tokens:
+            tok.revoked_at = now
+
+        # Issue new reset token
+        raw_token = generate_refresh_token()
+        token_hash = hash_token(raw_token)
+        reset_row = RefreshToken(
+            user_id=user.id,
+            token_hash=token_hash,
+            purpose="password_reset",
+            expires_at=now + timedelta(minutes=settings.PASSWORD_RESET_MINUTES),
+        )
+        db.add(reset_row)
+
+        # Commit the token BEFORE attempting email delivery.
+        # A delivery failure must not roll back the token — the user may
+        # retry and a new token will be issued (the old one still valid if
+        # delivery fails silently).
+        db.commit()
+        logger.info(
+            "Password-reset token issued",
+            extra={"user_id": str(user.id)},
+            # raw_token is NOT logged
+        )
+
+        try:
+            email_sender.send_password_reset(
+                to_email=clean_email,
+                raw_token=raw_token,
+                reset_base_url=settings.PASSWORD_RESET_BASE_URL,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Log delivery failure but do not raise — the token is committed
+            # and the generic success response is returned to prevent account
+            # enumeration via delivery-error messages.
+            logger.error(
+                "Password-reset email delivery failed",
+                extra={"user_id": str(user.id), "error": str(exc)},
+                # raw_token intentionally NOT included
+            )
+
+    @staticmethod
+    def reset_password(
+        db: Session,
+        raw_token: str,
+        new_password: str,
+    ) -> None:
+        """Consume a password-reset token and update the user's password.
+
+        Uses SELECT … FOR UPDATE to serialise concurrent requests on the same
+        token row: only one transaction can consume it; all others see
+        revoked_at already set and receive token_already_used.
+
+        On success:
+        - The reset token is marked used (revoked_at = now).
+        - The user's password_hash is updated.
+        - All active refresh tokens for the user are revoked (forces re-login).
+
+        Note: Stateless JWT access tokens issued before the reset remain valid
+        until their natural expiry (ACCESS_TOKEN_MINUTES). Shortening that TTL
+        or adding a token-revocation store is a future hardening step.
+
+        Raises:
+            UnauthorizedError: for invalid / expired / already-used tokens.
+        """
+        token_hash = hash_token(raw_token)
+        now = datetime.now(UTC)
+
+        # Lock the row for the duration of this transaction to prevent
+        # concurrent double-consumption.
+        token_row = db.scalar(
+            select(RefreshToken)
+            .where(
+                RefreshToken.token_hash == token_hash,
+                RefreshToken.purpose == "password_reset",
+            )
+            .with_for_update()
+        )
+
+        if token_row is None:
+            raise UnauthorizedError(
+                message="Invalid password reset token.",
+                code="token_invalid",
+            )
+        if token_row.revoked_at is not None:
+            raise UnauthorizedError(
+                message="This password reset token has already been used.",
+                code="token_already_used",
+            )
+        expires_at = token_row.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if expires_at <= now:
+            raise UnauthorizedError(
+                message="This password reset token has expired.",
+                code="token_expired",
+            )
+
+        user = db.get(User, token_row.user_id)
+        if user is None:
+            # Defensive: cascade should prevent this but handle gracefully.
+            raise UnauthorizedError(
+                message="Invalid password reset token.",
+                code="token_invalid",
+            )
+
+        # Atomically: consume reset token + update password + revoke refresh tokens
+        token_row.revoked_at = now
+        user.password_hash = hash_password(new_password)
+
+        # Revoke all active refresh tokens — this forces re-login on all devices.
+        # Note: already-issued JWT access tokens remain valid until they expire
+        # naturally (they are stateless). This limitation is documented in
+        # PROGRESS.md.
+        active_refresh = db.scalars(
+            select(RefreshToken).where(
+                RefreshToken.user_id == user.id,
+                RefreshToken.purpose == "refresh",
+                RefreshToken.revoked_at.is_(None),
+            )
+        ).all()
+        for tok in active_refresh:
+            tok.revoked_at = now
+
+        db.commit()
+        logger.info(
+            "Password reset completed; all refresh tokens revoked",
+            extra={"user_id": str(user.id)},
+        )

@@ -120,6 +120,36 @@ class LimitExceededError(AppError):
         )
 
 
+class RateLimitError(AppError):
+    def __init__(
+        self,
+        message: str = "Too many requests. Please try again later.",
+        code: str = "rate_limit_exceeded",
+        details: dict[str, Any] | list[Any] | None = None,
+    ) -> None:
+        super().__init__(
+            code=code,
+            message=message,
+            http_status=status.HTTP_429_TOO_MANY_REQUESTS,
+            details=details,
+        )
+
+
+class ServiceUnavailableError(AppError):
+    def __init__(
+        self,
+        message: str = "Service temporarily unavailable. Please try again later.",
+        code: str = "service_unavailable",
+        details: dict[str, Any] | list[Any] | None = None,
+    ) -> None:
+        super().__init__(
+            code=code,
+            message=message,
+            http_status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            details=details,
+        )
+
+
 class InternalError(AppError):
     def __init__(
         self,

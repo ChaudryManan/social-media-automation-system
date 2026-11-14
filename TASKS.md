@@ -26,7 +26,7 @@ Goal: runnable backend with auth, roles, workspaces and limits.
   **Done when:** tests cover register→login→me→refresh→logout and wrong-password/inactive cases. **Dep:** B1-04.
 - [x] **B1-06 RBAC and admin seed** — dependencies `get_current_user`, `require_admin`; `make seed` creates the admin idempotently; default `system_settings` inserted if missing. Refs: FR-1.3.
   **Done when:** a user token gets 403 on a dummy admin route; admin gets 200. **Dep:** B1-05.
-- [ ] **B1-07 Password reset** — `forgot-password` / `reset-password` with single-use expiring token; email sender interface with console implementation. Refs: FR-1.2.
+- [x] **B1-07 Password reset** — `forgot-password` / `reset-password` with single-use expiring token; email sender interface with console implementation. Refs: FR-1.2.
   **Done when:** test completes the reset flow using the console sender's captured token. **Dep:** B1-05.
 - [ ] **B1-08 Workspaces CRUD** — create/list/get/update/soft-delete; fields per `DATABASE.md` 4.4; `get_workspace_for_user` ownership dependency (admin bypass); unique name per owner; delete requires `?confirm=true`. Refs: FR-1.4, FR-2a.1–3.
   **Done when:** user A cannot read/modify user B's workspace (404); soft-deleted workspaces disappear from lists. **Dep:** B1-06.

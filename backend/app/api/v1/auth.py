@@ -1,14 +1,17 @@
 """Authentication and session management API router."""
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.db import get_db
 from app.core.deps import get_current_user
+from app.core.ratelimit import check_password_reset_rate_limits
 from app.models.users import User
 from app.schemas.auth import (
+    ForgotPasswordRequest,
     MessageResponse,
+    ResetPasswordRequest,
     TokenRefreshRequest,
     TokenResponse,
     UserLoginRequest,
@@ -123,3 +126,56 @@ def get_me(
 ) -> UserResponse:
     """Return profile details for the authenticated user."""
     return UserResponse.model_validate(current_user)
+
+
+_FORGOT_PASSWORD_RESPONSE = (
+    "If that address is registered, a password reset link has been sent."
+)
+
+
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Request a password reset link",
+)
+def forgot_password(
+    payload: ForgotPasswordRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> MessageResponse:
+    """Send a password reset link if the email is registered.
+
+    Always returns the same generic response regardless of whether the email
+    exists in the system (prevents account enumeration).
+    Rate-limited per IP and per account.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    check_password_reset_rate_limits(ip=client_ip, email=payload.email)
+    AuthService.forgot_password(db=db, email=payload.email)
+    return MessageResponse(message=_FORGOT_PASSWORD_RESPONSE)
+
+
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Reset password using a valid reset token",
+)
+def reset_password(
+    payload: ResetPasswordRequest,
+    db: Session = Depends(get_db),
+) -> MessageResponse:
+    """Consume a password-reset token and update the account password.
+
+    The token must not be expired, revoked, or already used.
+    All active refresh sessions are invalidated on success.
+    Note: stateless JWT access tokens issued before this call remain valid
+    until their natural expiry (ACCESS_TOKEN_MINUTES).
+    """
+    AuthService.reset_password(
+        db=db,
+        raw_token=payload.token,
+        new_password=payload.new_password,
+    )
+    return MessageResponse(message="Password reset successfully. Please log in again.")

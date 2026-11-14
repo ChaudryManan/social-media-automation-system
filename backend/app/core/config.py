@@ -56,6 +56,19 @@ class Settings(BaseSettings):
     TIKTOK_CLIENT_KEY: str | None = None
     TIKTOK_CLIENT_SECRET: str | None = None
 
+    # Password reset
+    PASSWORD_RESET_MINUTES: int = 60
+    PASSWORD_RESET_BASE_URL: str = "http://localhost:3000/reset-password"
+    # Rate limiting: fixed-window counters stored in Redis
+    PW_RESET_IP_LIMIT: int = 5
+    PW_RESET_IP_WINDOW_SECONDS: int = 600  # 10 minutes
+    PW_RESET_ACCT_LIMIT: int = 3
+    PW_RESET_ACCT_WINDOW_SECONDS: int = 900  # 15 minutes
+    PW_RESET_COOLDOWN_SECONDS: int = 60  # min gap between requests per account
+
+    # Email provider (console | smtp)
+    EMAIL_PROVIDER: str = "console"
+
     # Seeding (required for make seed; credentials must be in environment)
     SEED_ADMIN_EMAIL: str | None = None
     SEED_ADMIN_PASSWORD: str | None = None

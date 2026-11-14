@@ -78,3 +78,25 @@ class MessageResponse(BaseModel):
     """Generic status message response."""
 
     message: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    """Payload for initiating a password reset."""
+
+    email: str = Field(..., max_length=255)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_format(cls, value: str) -> str:
+        """Validate and normalize email address."""
+        cleaned = value.strip().lower()
+        if not EMAIL_REGEX.match(cleaned):
+            raise ValueError("Invalid email address format")
+        return cleaned
+
+
+class ResetPasswordRequest(BaseModel):
+    """Payload for completing a password reset."""
+
+    token: str = Field(..., min_length=1, max_length=256)
+    new_password: str = Field(..., min_length=8, max_length=128)
