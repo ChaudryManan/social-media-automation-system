@@ -22,7 +22,7 @@ Goal: runnable backend with auth, roles, workspaces and limits.
   **Done when:** a test hits an endpoint that raises `AppError` and gets `{error:{code,message,details}}`. **Dep:** B1-01.
 - [x] **B1-04 Database and first migration** — SQLAlchemy base/session (`core/db.py`), Alembic setup; migration for `users`, `refresh_tokens`, `user_limits`, `workspaces`, `audit_logs`, `system_settings` per `DATABASE.md`. Decide enum strategy (PG enum vs text+CHECK) and record it in `PROGRESS.md` Decisions.
   **Done when:** `make migrate` on an empty DB creates the tables; downgrade works. **Dep:** B1-02, B1-03.
-- [ ] **B1-05 Auth endpoints** — register, login, refresh, logout, `GET /auth/me`; password hashing; JWT access + hashed refresh tokens; inactive users blocked. Refs: FR-1.1.
+- [x] **B1-05 Auth endpoints** — register, login, refresh, logout, `GET /auth/me`; password hashing; JWT access + hashed refresh tokens; inactive users blocked. Refs: FR-1.1.
   **Done when:** tests cover register→login→me→refresh→logout and wrong-password/inactive cases. **Dep:** B1-04.
 - [ ] **B1-06 RBAC and admin seed** — dependencies `get_current_user`, `require_admin`; `make seed` creates the admin idempotently; default `system_settings` inserted if missing. Refs: FR-1.3.
   **Done when:** a user token gets 403 on a dummy admin route; admin gets 200. **Dep:** B1-05.

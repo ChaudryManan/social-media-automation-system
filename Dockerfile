@@ -11,11 +11,13 @@ COPY backend ./backend
 
 RUN pip install --no-cache-dir \
         "alembic==1.16.1" \
+        "argon2-cffi==23.1.0" \
         "celery==5.5.3" \
         "fastapi==0.115.12" \
         "psycopg[binary]==3.2.9" \
         "pydantic==2.11.4" \
         "pydantic-settings==2.9.1" \
+        "PyJWT==2.10.1" \
         "redis==6.2.0" \
         "SQLAlchemy==2.0.41" \
         "uvicorn==0.34.2" \

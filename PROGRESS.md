@@ -7,10 +7,10 @@
 
 ## 1. NEXT ACTION (one precise step)
 
-> **Start task `B1-05` (Auth endpoints) in `TASKS.md`.**
-> Implement register, login, refresh, logout, GET /auth/me, password hashing, JWT access tokens, and hashed refresh tokens per `PRD.md` FR-1.1 and `DATABASE.md` 4.1-4.2.
+> **Start task `B1-06` (RBAC and admin seed) in `TASKS.md`.**
+> Implement `require_admin` dependency, `make seed` CLI command to create admin user idempotently from settings, and populate default `system_settings`.
 
-Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last commit: `B1-04: database and first migration`
+Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last commit: `B1-05: auth endpoints, argon2 hashing and jwt tokens`
 
 ## 2. How to resume (any agent)
 
@@ -24,7 +24,7 @@ Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last co
 | Phase | Scope | Status | Done / Total |
 |---|---|---|---|
 | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
-| B1 | Foundation: auth, roles, workspaces, limits | In progress | 4 / 11 |
+| B1 | Foundation: auth, roles, workspaces, limits | In progress | 5 / 11 |
 | B2 | Agent engine (post flow) | Not started | 0 / 13 |
 | B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 18 |
 | B4 | Video flow | Not started | 0 / 10 |
@@ -43,6 +43,7 @@ Milestones:
 
 ## 5. Recently completed (newest first, keep last ~10)
 
+- 2026-11-14 — B1-05 completed: Auth endpoints. Implemented Argon2id password hashing and PyJWT access token generation (`core/security.py`), bearer token auth dependency (`core/deps.py`), Pydantic schemas (`schemas/auth.py`), service layer (`services/auth.py`), and FastAPI routes (`api/v1/auth.py`) for `/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, and `/auth/me` (with dual `/api/v1/auth` mounting). Enforced inactive user blocks, case-insensitive email uniqueness, and token rotation. Full unit and integration test coverage (44 passing tests).
 - 2026-11-14 — B1-04 completed: Database and first migration. Added SQLAlchemy 2.0 sync engine + Base + session dependency (`core/db.py`), 6 foundation models (`users`, `refresh_tokens`, `user_limits`, `workspaces`, `audit_logs`, `system_settings`), Alembic configuration and initial migration (`0001_initial_schema`), `make migrate`/`downgrade`/`migration` targets, model unit tests and migration upgrade/downgrade integration test (23 tests total passing). Resolved host IPv6 port resolution delay by standardizing on `127.0.0.1:15432`.
 - 2026-11-14 — B1-03 completed: Core infrastructure with typed pydantic-settings, structured JSON logging with request-ID propagation, AppError hierarchy with global exception handlers (including 422 mapping), and CORS middleware.
 - 2026-11-13 — B1-02 completed: Compose services and healthchecks, minimal FastAPI liveness/readiness endpoints, health tests, and Windows-friendly first-start timing.
@@ -99,6 +100,13 @@ Template — copy for each session:
 - Next: <the precise next action — also copied to section 1>
 - Watch out: <gotchas, flaky tests, decisions the next agent must know>
 ```
+
+### 2026-11-14 — Antigravity — B1-05
+- Did: Implemented authentication layer per PRD FR-1.1 and TASKS.md B1-05: `core/security.py` (Argon2id password hashing, JWT access token generation with HS256, secure refresh token generation and SHA-256 storage hash); `core/deps.py` (`get_current_user` Bearer dependency); `schemas/auth.py` (UserRegisterRequest with email validation, UserLoginRequest, TokenRefreshRequest, UserLogoutRequest, UserResponse, TokenResponse); `services/auth.py` (AuthService with register, login, refresh with rotation, logout with revocation); `api/v1/auth.py` (FastAPI router mounted at `/auth` and `/api/v1/auth` covering `/register`, `/login`, `/refresh`, `/logout`, `/me`); added unit tests in `test_security.py` and integration tests in `test_auth_api.py` covering happy paths, duplicate emails, inactive user blocking, invalid/expired tokens, and token rotation (44 total passing tests).
+- State: tests pass (44 passed, 1 third-party deprecation warning), lint clean (`make lint`), branch `main`.
+- Left undone: nothing for B1-05.
+- Next: start task B1-06 (RBAC and admin seed) in `TASKS.md`: add `require_admin` dependency, `make seed` CLI command to idempotently create admin from settings, and seed default `system_settings`.
+- Watch out: Argon2 password hashing takes ~100ms per operation by design for security; integration tests run in ~58 seconds against PostgreSQL test database.
 
 ### 2026-11-14 — Antigravity — B1-04
 - Did: Implemented SQLAlchemy 2.0 Base, engine, and session management (`core/db.py`); created 6 foundation ORM models (`users`, `refresh_tokens`, `user_limits`, `workspaces`, `audit_logs`, `system_settings`) with text CHECK enums, email lowercasing validator, and partial unique indexes; configured Alembic (`alembic.ini`, `backend/alembic/env.py`) with initial migration `0001_initial_schema`; added `make migrate`/`downgrade`/`migration` targets; added unit tests (`test_models.py`) and migration upgrade/downgrade integration test (`test_migrations.py`); identified and resolved Windows IPv6 resolution latency by standardizing on `127.0.0.1:15432`; added FK index on `refresh_tokens.user_id` and aligned `user_limits` documentation.

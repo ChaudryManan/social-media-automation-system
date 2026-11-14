@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.v1.auth import router as auth_router
 from app.core.config import settings
 from app.core.errors import register_error_handlers
 from app.core.logging import setup_logging
@@ -68,6 +69,10 @@ def create_app() -> FastAPI:
     )
 
     register_error_handlers(application)
+
+    # Mount API routers (both /auth and /api/v1/auth prefixes supported)
+    application.include_router(auth_router)
+    application.include_router(auth_router, prefix="/api/v1")
 
     @application.get("/health")
     def health() -> dict[str, str]:
