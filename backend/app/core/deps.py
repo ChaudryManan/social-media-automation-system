@@ -5,12 +5,14 @@ from uuid import UUID
 import jwt
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
-from app.core.errors import ForbiddenError, UnauthorizedError
+from app.core.errors import ForbiddenError, NotFoundError, UnauthorizedError
 from app.core.security import decode_access_token
 from app.models.users import User
+from app.models.workspaces import Workspace
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -87,3 +89,29 @@ def require_admin(
             code="admin_required",
         )
     return current_user
+
+
+def get_workspace_for_user(
+    workspace_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Workspace:
+    """Return the live workspace if the caller owns it (admins may access any).
+
+    A workspace that does not exist, is soft-deleted, or belongs to someone else
+    all produce the same 404, so ids of other users' workspaces are not revealed.
+    """
+    workspace = db.scalar(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.deleted_at.is_(None),
+        )
+    )
+    if workspace is None or (
+        workspace.owner_id != current_user.id and current_user.role != "admin"
+    ):
+        raise NotFoundError(
+            message="Workspace not found",
+            code="workspace_not_found",
+        )
+    return workspace

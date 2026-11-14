@@ -110,6 +110,8 @@ Also used for password reset tokens via a `purpose` column (`refresh` \| `passwo
 | deleted_at | timestamptz | soft delete |
 | created_at, updated_at | timestamptz | |
 
+Service rules (B1-08): name uniqueness per owner is checked **ignoring case** among non-deleted workspaces (the partial unique index stays case-sensitive as the final guard against concurrent requests); `timezone` must be a valid IANA name (the `tzdata` package is a dependency so this works on Windows and slim images); `default_language` is a short tag (2–10 characters, e.g. `en`, `ur`, `roman-ur`); `default_platforms` holds only `platform` enum values without duplicates; unknown input fields are rejected, so `owner_id` and `is_suspended` cannot be set through the user API (`is_suspended` is changed by admin APIs in B5-10).
+
 ### 4.5 `social_accounts`
 | Column | Type | Notes |
 |---|---|---|

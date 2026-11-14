@@ -7,10 +7,10 @@
 
 ## 1. NEXT ACTION (one precise step)
 
-> **Start task `B1-08` (Workspaces CRUD) in `TASKS.md`.**
-> Implement create/list/get/update/soft-delete for workspaces per `DATABASE.md` 4.4 and `PRD.md` FR-1.4 / FR-2a.1–3, with ownership dependency `get_workspace_for_user` (admin bypass), unique name per owner, and `?confirm=true` required for deletion.
+> **Start task `B1-09` (Limits and audit helper) in `TASKS.md`.**
+> Add `services/usage.py` (effective limits = `user_limits` override, else `system_settings` default) and enforce `max_workspaces` when creating a workspace (hook into `WorkspaceService.create` / `POST /workspaces`, clear 4xx via `LimitExceededError`). Add `services/audit.py::log(actor, action, entity, meta)` and log workspace deletes (hook into `WorkspaceService.soft_delete`) and admin access to other users' workspaces. Refs: FR-2a.4. Done when creating workspace number limit+1 returns a clear 4xx error.
 
-Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last commit: `B1-07: implement secure password reset`
+Last updated: 2026-11-14 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B1-08: workspaces CRUD`
 
 ## 2. How to resume (any agent)
 
@@ -24,7 +24,7 @@ Last updated: 2026-11-14 · Last agent: Antigravity · Branch: `main` · Last co
 | Phase | Scope | Status | Done / Total |
 |---|---|---|---|
 | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
-| B1 | Foundation: auth, roles, workspaces, limits | In progress | 7 / 11 |
+| B1 | Foundation: auth, roles, workspaces, limits | In progress | 8 / 11 |
 | B2 | Agent engine (post flow) | Not started | 0 / 13 |
 | B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 18 |
 | B4 | Video flow | Not started | 0 / 10 |
@@ -43,6 +43,7 @@ Milestones:
 
 ## 5. Recently completed (newest first, keep last ~10)
 
+- 2026-11-14 — B1-08 completed: Workspaces CRUD. `POST/GET /workspaces`, `GET/PATCH/DELETE /workspaces/{id}` (dual-mounted with `/api/v1`), schemas with validation (`schemas/workspaces.py`: trimmed name, IANA timezone, language tag, platform list, settings size cap, unknown fields rejected), `WorkspaceService` (`services/workspaces.py`: case-insensitive unique name per owner with DB-index race fallback, paginated own-list, partial update that can clear nullable fields, soft delete), `get_workspace_for_user` dependency in `core/deps.py` (owner or admin; anything else is 404). Delete requires `?confirm=true`. 79 new tests (35 unit, 44 integration); full suite 169 passed.
 - 2026-11-14 — B1-07 completed: Password reset workflow. Implemented `/auth/forgot-password` and `/auth/reset-password` endpoints (dual-mounted with `/api/v1` prefix). Fixed-window rate limiting per-IP (5 / 10 min) and per-account (3 / 15 min) with 60s cooldown key via Redis (`core/ratelimit.py`), failing closed with HTTP 503 `ServiceUnavailableError`. Generic 200 response for forgot-password preventing account enumeration; single-use token semantics via `refresh_tokens` (`purpose='password_reset'`, `revoked_at`), row-level lock concurrency protection (`with_for_update()`), all active refresh tokens revoked upon reset. Added `BaseEmailSender` / `ConsoleEmailSender` (`providers/email.py`) dispatching reset URL without logging tokens. Full unit tests (21 tests in `test_password_reset_service.py`) and integration tests in `test_password_reset.py`.
 - 2026-11-14 — B1-06 completed: RBAC and admin seed. Implemented `require_admin` dependency (`core/deps.py`), admin router with dummy authorization test route (`api/v1/admin.py`), idempotent seeding service (`services/seed.py`) with secure environment credential validation and automatic user promotion protection, 12 canonical system settings without overwriting customizations, and `make seed` Makefile target. Full unit and integration test coverage (`test_rbac.py`, `test_seed_service.py`, `test_admin_seed.py`).
 - 2026-11-14 — B1-05 completed: Auth endpoints. Implemented Argon2id password hashing and PyJWT access token generation (`core/security.py`), bearer token auth dependency (`core/deps.py`), Pydantic schemas (`schemas/auth.py`), service layer (`services/auth.py`), and FastAPI routes (`api/v1/auth.py`) for `/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, and `/auth/me` (with dual `/api/v1/auth` mounting). Enforced inactive user blocks, case-insensitive email uniqueness, and token rotation. Full unit and integration test coverage (44 passing tests).
@@ -66,6 +67,10 @@ Milestones:
 
 | Date | ID | Decision | Why | Docs updated |
 |---|---|---|---|---|
+| 2026-11-14 | B1-08-1 | Workspace name uniqueness per owner is checked case-insensitively in the service (among non-deleted rows); the DB partial unique index stays case-sensitive as the race guard (IntegrityError maps to the same 409 `workspace_name_taken`). | "Brand" vs "brand" is confusing for users; no migration needed. | DATABASE.md |
+| 2026-11-14 | B1-08-2 | A workspace that is missing, soft-deleted, or owned by someone else returns the same 404 `workspace_not_found` (admins may access any live workspace). `GET /workspaces` always lists only the caller's own workspaces, even for admins (an admin-wide list is `GET /admin/workspaces` in B5-10). | Does not reveal which ids exist; keeps the admin list task separate. | ARCHITECTURE.md |
+| 2026-11-14 | B1-08-3 | Create/update schemas use `extra="forbid"`: `owner_id`, `is_suspended` and other unknown fields give 422 instead of being silently ignored. Delete without `?confirm=true` gives 400 `confirmation_required` (checked after authorization). | Prevents privilege/ownership tampering; makes API misuse visible. | DATABASE.md, ARCHITECTURE.md |
+| 2026-11-14 | B1-08-4 | Added `tzdata==2025.2` as a runtime dependency (pyproject.toml and Dockerfile) for IANA timezone validation via `zoneinfo`. | Windows and slim images have no system timezone database, so every timezone check would fail without it. | pyproject.toml, Dockerfile |
 | 2026-11-14 | B1-07-1 | Use Redis fixed-window rate limiter with per-IP (5 / 10m) and per-account (3 / 15m) counters plus a 60-second cooldown key (`SET NX EX 60`), failing closed with HTTP 503 `ServiceUnavailableError` when Redis is unreachable. | Prevents request flooding and account enumeration while strictly protecting the service against Redis outages. | PROGRESS.md, app/core/ratelimit.py |
 | 2026-11-14 | B1-07-2 | Reuse `refresh_tokens` table for password-reset tokens (`purpose='password_reset'`, `revoked_at` for single-use, `expires_at` for TTL, `SELECT … FOR UPDATE` row-level lock concurrency protection) without adding a new database migration. | Existing migration `0001_initial_schema` already created `purpose` with CHECK constraint `('refresh', 'password_reset')` and `revoked_at` column. | DATABASE.md, app/services/auth.py |
 | 2026-11-14 | B1-07-3 | On successful password reset, revoke all active refresh tokens for the account. Note: stateless JWT access tokens remain valid until expiration (`ACCESS_TOKEN_MINUTES=30`). | Standard security practice forcing re-login across devices; access tokens expire naturally due to short lifetime. | PROGRESS.md, app/services/auth.py |
@@ -83,7 +88,8 @@ Milestones:
 ## 8. Known issues, blockers, open questions
 
 **Known issues / tech debt:**
-- The Dockerfile currently installs Celery, FastAPI, psycopg, pydantic, pydantic-settings, Redis, and Uvicorn. Any task that adds a runtime dependency must also update the Dockerfile.
+- The Dockerfile installs a pinned list of runtime packages by hand (including `tzdata` since B1-08). Any task that adds a runtime dependency must also update the Dockerfile, then rebuild the image with `docker compose build api`.
+- Pending hook (B3-06): `WorkspaceService.soft_delete` must cancel the workspace's pending jobs and non-final requests once those tables exist (`DATABASE.md` section 6 rule 7). The reminder is in the B3-06 task text.
 - Worker and Beat healthchecks are simple Redis pings until the Celery app exists in B3-06.
 
 **Blocked (`[!]` tasks):** *(none)*
@@ -105,6 +111,18 @@ Template — copy for each session:
 - Next: <the precise next action — also copied to section 1>
 - Watch out: <gotchas, flaky tests, decisions the next agent must know>
 ```
+
+### 2026-11-14 — Claude (chat, cloned the public repo) — B1-08
+- Did: Implemented Workspaces CRUD (FR-1.4, FR-2a.1–3):
+  - `schemas/workspaces.py`, `services/workspaces.py`, `api/v1/workspaces.py` (mounted at `/workspaces` and `/api/v1/workspaces` in `main.py`), `get_workspace_for_user` in `core/deps.py`.
+  - Create/list(paginated, own only)/get/partial update/soft delete (`?confirm=true`); duplicate names per owner give 409 `workspace_name_taken` (case-insensitive); other users' or deleted workspaces give 404 `workspace_not_found`; admins may get/update/delete any live workspace.
+  - No new migration: the `workspaces` table from `0001_initial_schema` already has every column.
+  - Added `tzdata==2025.2` to `pyproject.toml` and `Dockerfile`.
+  - Docs updated: `TASKS.md` (B1-08 ticked, B3-06 reminder), `DATABASE.md` (4.4 service rules), `ARCHITECTURE.md` (API row), this file.
+- State: `ruff check` clean; full suite 169 passed against a real PostgreSQL 16 on port 15432 (35 new unit tests, 44 new integration tests). Integration tests skip cleanly if Postgres is not running. Two pre-existing files (`services/seed.py`, `tests/integration/test_admin_seed.py`) would be changed by `ruff format --check`; left untouched on purpose. Docker was not run in this session.
+- Left undone: nothing for B1-08. Audit logging and the `max_workspaces` limit are B1-09.
+- Next: start `B1-09` (limits and audit helper).
+- Watch out: rebuild the API image (`docker compose build api`) because of the new `tzdata` dependency. `get_workspace_for_user` already hides other users' ids behind 404; reuse it for every workspace-scoped route (accounts, requests, analytics) in later phases.
 
 ### 2026-11-14 — Antigravity — B1-07
 - Did: Implemented Password Reset workflow per PRD FR-1.2 and TASKS.md B1-07:

@@ -28,7 +28,7 @@ Goal: runnable backend with auth, roles, workspaces and limits.
   **Done when:** a user token gets 403 on a dummy admin route; admin gets 200. **Dep:** B1-05.
 - [x] **B1-07 Password reset** — `forgot-password` / `reset-password` with single-use expiring token; email sender interface with console implementation. Refs: FR-1.2.
   **Done when:** test completes the reset flow using the console sender's captured token. **Dep:** B1-05.
-- [ ] **B1-08 Workspaces CRUD** — create/list/get/update/soft-delete; fields per `DATABASE.md` 4.4; `get_workspace_for_user` ownership dependency (admin bypass); unique name per owner; delete requires `?confirm=true`. Refs: FR-1.4, FR-2a.1–3.
+- [x] **B1-08 Workspaces CRUD** — create/list/get/update/soft-delete; fields per `DATABASE.md` 4.4; `get_workspace_for_user` ownership dependency (admin bypass); unique name per owner; delete requires `?confirm=true`. Refs: FR-1.4, FR-2a.1–3.
   **Done when:** user A cannot read/modify user B's workspace (404); soft-deleted workspaces disappear from lists. **Dep:** B1-06.
 - [ ] **B1-09 Limits and audit helper** — `services/usage.py` (effective limits = `user_limits` override else `system_settings` default); enforce `max_workspaces`; `services/audit.py::log(actor, action, entity, meta)`; log admin overrides and workspace deletes. Refs: FR-2a.4.
   **Done when:** creating workspace number limit+1 returns a clear 4xx error. **Dep:** B1-08.
@@ -83,8 +83,8 @@ Goal: "Backend Core Complete" (`PRD.md` section 12) with `PUBLISHER_MODE=mock`.
   **Done when:** transitions to `awaiting_approval`, `needs_attention`, `held`, `published`, `publish_failed` create notifications. **Dep:** B3-03.
 - [ ] **B3-05 Submit request endpoint** — `POST /workspaces/{id}/requests` with full validation (accounts belong and active, publish_at future, moderation, quotas); creates request, targets and the `start_generation` job at `publish_at - lead_time`; list/get endpoints with filters and pagination. Refs: FR-3.1, 3.2, 4.1.
   **Done when:** invalid cases return clear errors and create no rows; valid case creates exactly one request, N targets, one job. **Dep:** B3-02, B3-03.
-- [ ] **B3-06 Scheduler service and Beat poller** — `services/scheduler.py`; Celery app, Beat entry `poll_due_jobs` every 60 s using `FOR UPDATE SKIP LOCKED`; stale-job reclaimer; backoff; cancel/reschedule helpers; `PATCH /requests/{id}/schedule`, `POST /requests/{id}/cancel`. Refs: FR-4.1, 4.2.
-  **Done when:** test with frozen time: due job enqueued once, not twice; cancel removes pending jobs. **Dep:** B3-05.
+- [ ] **B3-06 Scheduler service and Beat poller** — `services/scheduler.py`; Celery app, Beat entry `poll_due_jobs` every 60 s using `FOR UPDATE SKIP LOCKED`; stale-job reclaimer; backoff; cancel/reschedule helpers; `PATCH /requests/{id}/schedule`, `POST /requests/{id}/cancel`. Also wire `WorkspaceService.soft_delete` (B1-08) to cancel the workspace's pending jobs and non-final requests (`DATABASE.md` section 6 rule 7, `PRD.md` FR-2a.3). Refs: FR-4.1, 4.2, 2a.3.
+  **Done when:** test with frozen time: due job enqueued once, not twice; cancel removes pending jobs; deleting a workspace cancels its pending jobs. **Dep:** B3-05.
 - [ ] **B3-07 Generation task** — `workflow.start_generation(request_id)`: create run row, invoke graph, persist content items/media, transition to `generating` → `awaiting_approval` or `needs_attention`; `human_approval` node writes `content_items` and notifies. Refs: FR-5.x, 6.3.
   **Done when:** with fake LLM, a queued request ends `awaiting_approval` with a content item per platform. **Dep:** B3-06, B2-13.
 - [ ] **B3-08 Escalation resolve endpoint** — `POST /requests/{id}/resolve {action: retry|abort}` resuming the graph.

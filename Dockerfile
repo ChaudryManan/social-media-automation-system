@@ -20,5 +20,6 @@ RUN pip install --no-cache-dir \
         "PyJWT==2.10.1" \
         "redis==6.2.0" \
         "SQLAlchemy==2.0.41" \
+        "tzdata==2025.2" \
         "uvicorn==0.34.2" \
     && pip install --no-cache-dir --no-deps .

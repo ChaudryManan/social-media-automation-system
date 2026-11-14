@@ -290,7 +290,7 @@ All workspace-scoped routes check ownership (`get_workspace_for_user` dependency
 |---|---|
 | Auth | `POST /auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`; `GET /auth/me` |
 | Users | `GET/PATCH /users/me` |
-| Workspaces | `GET/POST /workspaces`; `GET/PATCH/DELETE /workspaces/{id}` |
+| Workspaces | `GET/POST /workspaces` (list is the caller's own, paginated, newest first); `GET/PATCH/DELETE /workspaces/{id}` (PATCH is partial; DELETE is a soft delete and needs `?confirm=true`; someone else's or a deleted workspace is 404) |
 | Accounts | `GET /workspaces/{id}/accounts`; `POST /workspaces/{id}/accounts/dev` (dev token, disabled in production); `POST /workspaces/{id}/accounts/connect/{platform}` (returns OAuth URL); `GET /oauth/{platform}/callback`; `DELETE /accounts/{id}` |
 | Requests | `POST /workspaces/{id}/requests`; `GET /workspaces/{id}/requests`; `GET /requests/{id}` (status, steps summary); `PATCH /requests/{id}/schedule`; `POST /requests/{id}/cancel`; `POST /requests/{id}/resolve` (escalation) |
 | Approval | `GET /requests/{id}/preview`; `PATCH /requests/{id}/content`; `POST /requests/{id}/approve` (`publish_now`, `reschedule_to` optional); `POST /requests/{id}/reject` (`feedback`, `regenerate`) |
