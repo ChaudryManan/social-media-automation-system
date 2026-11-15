@@ -32,7 +32,7 @@ Goal: runnable backend with auth, roles, workspaces and limits.
   **Done when:** user A cannot read/modify user B's workspace (404); soft-deleted workspaces disappear from lists. **Dep:** B1-06.
 - [x] **B1-09 Limits and audit helper** — `services/usage.py` (effective limits = `user_limits` override else `system_settings` default); enforce `max_workspaces`; `services/audit.py::log(actor, action, entity, meta)`; log admin overrides and workspace deletes. Refs: FR-2a.4.
   **Done when:** creating workspace number limit+1 returns a clear 4xx error. **Dep:** B1-08.
-- [ ] **B1-10 B1 test sweep and OpenAPI check** — coverage of auth/workspaces; `/docs` shows all routes with tags and examples.
+- [x] **B1-10 B1 test sweep and OpenAPI check** — coverage of auth/workspaces; `/docs` shows all routes with tags and examples.
   **Done when:** `make test` green; CI-style run from a clean clone works using README steps. **Dep:** B1-01…B1-09.
 - [ ] **B1-11 Uvicorn access logs in JSON with request id** — Configure Uvicorn / middleware so that API access logs are emitted as JSON lines that include request_id (e.g. disable Uvicorn's default access log and emit one structured line per request from middleware).
   **Done when:** the API container's access logs are JSON lines that include request_id. **Dep:** B1-03.

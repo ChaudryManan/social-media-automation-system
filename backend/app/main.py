@@ -14,6 +14,40 @@ from app.core.errors import register_error_handlers
 from app.core.logging import setup_logging
 from app.core.middleware import RequestIDMiddleware
 
+API_DESCRIPTION = """\
+Backend API for the Social Media Multi-Agent Automation Platform.
+
+**Base path:** every endpoint below is served under `/api/v1`.
+
+**Authentication:** call `POST /api/v1/auth/login`, then click **Authorize** and \
+paste the `access_token`. Access tokens are short-lived; use `/auth/refresh`.
+
+**Errors:** every error has the shape \
+`{"error": {"code": "...", "message": "...", "details": ...}}`. Branch on `code`, \
+not on `message`. Validation errors are HTTP 422 with `code=validation_error`.
+
+**Pagination:** list endpoints take `limit` and `offset` and return \
+`{items, total, limit, offset}`.
+"""
+
+OPENAPI_TAGS = [
+    {
+        "name": "auth",
+        "description": "Register, log in, refresh, log out, password reset.",
+    },
+    {
+        "name": "workspaces",
+        "description": "A user's brands/projects. Owner-only (admins bypass, audited).",
+    },
+    {"name": "admin", "description": "Administrator-only endpoints."},
+    {
+        "name": "health",
+        "description": (
+            "Liveness and readiness probes (served at the root, not under `/api/v1`)."
+        ),
+    },
+]
+
 
 def _database_is_available() -> bool:
     """Return whether PostgreSQL accepts a lightweight query."""
@@ -56,6 +90,8 @@ def create_app() -> FastAPI:
     application = FastAPI(
         title="Social Media Automation Platform",
         version="0.1.0",
+        description=API_DESCRIPTION,
+        openapi_tags=OPENAPI_TAGS,
     )
 
     # Middleware execution order: RequestIDMiddleware runs on all requests;
@@ -72,20 +108,35 @@ def create_app() -> FastAPI:
 
     register_error_handlers(application)
 
-    # Mount API routers (both /auth and /api/v1/auth prefixes supported)
-    application.include_router(auth_router)
-    application.include_router(auth_router, prefix="/api/v1")
-    application.include_router(admin_router)
-    application.include_router(admin_router, prefix="/api/v1")
-    application.include_router(workspaces_router)
-    application.include_router(workspaces_router, prefix="/api/v1")
+    # Routers are served under /api/v1 (the documented, canonical path) and, for
+    # backwards compatibility, also at the root. The root copies are hidden from
+    # OpenAPI so /docs lists every route exactly once.
+    for router in (auth_router, admin_router, workspaces_router):
+        application.include_router(router, prefix="/api/v1")
+        application.include_router(router, include_in_schema=False)
 
-    @application.get("/health")
+    @application.get("/health", tags=["health"])
     def health() -> dict[str, str]:
         """Report that the API process is alive."""
         return {"status": "ok"}
 
-    @application.get("/health/ready")
+    @application.get(
+        "/health/ready",
+        tags=["health"],
+        responses={
+            503: {
+                "description": "A dependency is down.",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "status": "not_ready",
+                            "checks": {"database": True, "redis": False},
+                        }
+                    }
+                },
+            }
+        },
+    )
     def ready() -> JSONResponse:
         """Report whether API database and Redis dependencies are ready."""
         checks = {

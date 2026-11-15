@@ -43,7 +43,7 @@
 2. New/changed behaviour has tests (unit, graph, integration as appropriate) and `make test` is green.
 3. `make lint` (ruff) is clean; types are annotated on public functions.
 4. DB changes have an Alembic migration (up and down work) and `DATABASE.md` is updated.
-5. API changes appear in OpenAPI with request/response schemas and error cases; `ARCHITECTURE.md` API table updated.
+5. API changes appear in OpenAPI with request/response schemas and error cases; `ARCHITECTURE.md` API table updated. New routes get a tag, a summary, model examples and `responses=errors(...)` from `app/api/docs.py`; `tests/unit/test_openapi.py` fails if one is missing.
 6. No secrets, tokens or personal data in code, logs, fixtures or commits.
 7. `TASKS.md` box ticked; `PROGRESS.md` updated (section 6).
 

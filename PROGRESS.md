@@ -7,10 +7,10 @@
 
 ## 1. NEXT ACTION (one precise step)
 
-> **Start task `B1-10` (B1 test sweep and OpenAPI check) in `TASKS.md`.**
-> Review test coverage of auth + workspaces (including the new limits/audit paths), make `/docs` show every route with tags, summaries and request/response examples (add `examples` to the schemas in `schemas/auth.py` and `schemas/workspaces.py` and `responses=` for the error cases), and verify a clean-clone run works from the README steps (`make test`, `make lint`, `make migrate`, `make seed`). Done when: `make test` is green and the README steps work from a fresh clone. Do not start B1-11 in the same change.
+> **Start task `B1-11` (Uvicorn access logs in JSON with request id) in `TASKS.md`.**
+> Disable Uvicorn's default access log (`--no-access-log`, in `docker-compose.yml` and any Dockerfile CMD) and emit exactly one structured JSON line per request from `core/middleware.py` with `request_id`, method, path, status and duration (the request-id middleware and JSON logging already exist from B1-03; extend them rather than adding a new mechanism). Never log request bodies, `Authorization` headers or tokens. Done when: the API container's access logs are JSON lines that include `request_id`. Then B1 is complete and the next task is `B2-01`.
 
-Last updated: 2026-11-14 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B1-09: user limits and audit log helper`
+Last updated: 2026-11-14 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B1-10: OpenAPI docs, test sweep and portable Makefile`
 
 ## 2. How to resume (any agent)
 
@@ -24,7 +24,7 @@ Last updated: 2026-11-14 · Last agent: Claude (chat, via cloned repo) · Branch
 | Phase | Scope | Status | Done / Total |
 |---|---|---|---|
 | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
-| B1 | Foundation: auth, roles, workspaces, limits | In progress | 9 / 11 |
+| B1 | Foundation: auth, roles, workspaces, limits | In progress | 10 / 11 |
 | B2 | Agent engine (post flow) | Not started | 0 / 13 |
 | B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 18 |
 | B4 | Video flow | Not started | 0 / 10 |
@@ -43,6 +43,7 @@ Milestones:
 
 ## 5. Recently completed (newest first, keep last ~10)
 
+- 2026-11-14 — B1-10 completed: B1 test sweep and OpenAPI check. `/docs` now lists each of the 15 operations once under `/api/v1` with tags, summaries, request/response examples and documented errors in the real `{"error": {...}}` envelope (`schemas/errors.py`, `api/docs.py::errors`); root aliases hidden from the schema. Coverage sweep added 138 tests (suite 208 -> 346 passed, 0 skipped with Postgres and Redis): OpenAPI contract tests, JWT edge cases, reset rate-limiter failing closed, HTTP end-to-end password reset, deleted/inactive user paths, rename race. Auth/workspaces/limits/audit modules are at 98-100% line coverage. Makefile made portable (`BOOTSTRAP_PYTHON`), verified from a clean clone: README steps, `make test`, `make lint`, `make migrate`, `make seed`, and a live server smoke test.
 - 2026-11-14 — B1-09 completed: Limits and audit helper. `services/usage.py` (`get_effective_limits`: `user_limits` override, else `system_settings` default, else code fallback 3/5/100; `count_workspaces`; `ensure_can_create_workspace`), `services/audit.py::log` (adds an `audit_logs` row without committing; redacts sensitive `meta` keys). `WorkspaceService.create` locks the owner row and enforces `max_workspaces` (creating workspace number limit+1 gives 403 `workspace_limit_reached` with `details {limit, current}`); `WorkspaceService.soft_delete` now takes the actor and logs `workspace.delete` in the same transaction; `get_workspace_for_user` logs `workspace.admin_access` when an admin reaches someone else's workspace. 39 new tests (24 unit, 15 integration incl. a two-thread race test); full suite 208 passed.
 - 2026-11-14 — B1-08 completed: Workspaces CRUD. `POST/GET /workspaces`, `GET/PATCH/DELETE /workspaces/{id}` (dual-mounted with `/api/v1`), schemas with validation (`schemas/workspaces.py`: trimmed name, IANA timezone, language tag, platform list, settings size cap, unknown fields rejected), `WorkspaceService` (`services/workspaces.py`: case-insensitive unique name per owner with DB-index race fallback, paginated own-list, partial update that can clear nullable fields, soft delete), `get_workspace_for_user` dependency in `core/deps.py` (owner or admin; anything else is 404). Delete requires `?confirm=true`. 79 new tests (35 unit, 44 integration); full suite 169 passed.
 - 2026-11-14 — B1-07 completed: Password reset workflow. Implemented `/auth/forgot-password` and `/auth/reset-password` endpoints (dual-mounted with `/api/v1` prefix). Fixed-window rate limiting per-IP (5 / 10 min) and per-account (3 / 15 min) with 60s cooldown key via Redis (`core/ratelimit.py`), failing closed with HTTP 503 `ServiceUnavailableError`. Generic 200 response for forgot-password preventing account enumeration; single-use token semantics via `refresh_tokens` (`purpose='password_reset'`, `revoked_at`), row-level lock concurrency protection (`with_for_update()`), all active refresh tokens revoked upon reset. Added `BaseEmailSender` / `ConsoleEmailSender` (`providers/email.py`) dispatching reset URL without logging tokens. Full unit tests (21 tests in `test_password_reset_service.py`) and integration tests in `test_password_reset.py`.
@@ -52,8 +53,6 @@ Milestones:
 - 2026-11-14 — B1-03 completed: Core infrastructure with typed pydantic-settings, structured JSON logging with request-ID propagation, AppError hierarchy with global exception handlers (including 422 mapping), and CORS middleware.
 - 2026-11-13 — B1-02 completed: Compose services and healthchecks, minimal FastAPI liveness/readiness endpoints, health tests, and Windows-friendly first-start timing.
 - 2026-11-13 — B1-01 completed: repository package scaffold, pinned Python tooling, project-local `.venv` Make targets, environment template, and placeholder test.
-- 2026-11-13 — `AGENT_SPECS.md` added (per-agent schemas, checks, prompt rules, re-entry table, test fixtures); referenced from AGENTS, TASKS (B2, B4) and ARCHITECTURE.
-- 2026-11-13 — Planning docs written (PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, CLAUDE).
 
 ## 6. Environment and how to run
 
@@ -61,6 +60,7 @@ Milestones:
 - Python: 3.11+ · DB: PostgreSQL 16 · Queue: Redis + Celery/Beat · Agents: LangGraph.
 - Local run: `docker compose up` (after B1-02). Tests: `make test` (offline, fake LLM, mock publisher).
 - Default dev env values: `LLM_PROVIDER=fake`, `PUBLISHER_MODE=mock`, fake image/video/TTS/search providers.
+- Linux/macOS/CI: `make` creates the venv with `python3.13` (override with `make test BOOTSTRAP_PYTHON=python3`); Windows uses `py -3.13`. Integration tests need Postgres on 15432 and Redis (`docker compose up -d postgres redis`), otherwise they skip.
 - Windows: GNU Make 4.4.1 installed via winget; `make` creates and uses the project-local `.venv` with Python 3.13. Docker Desktop with WSL2 is required from B1-02.
 - Environment notes: Host port 5432 is blocked on this Windows machine (reserved/in-use by a local PostgreSQL service PID 4980), so Postgres is published on 127.0.0.1:15432 for host-side development (`postgresql+psycopg://sma:sma@127.0.0.1:15432/sma`). Never connect to port 5432 on the host machine. Always use IPv4 `127.0.0.1` rather than `localhost` to avoid Windows IPv6 resolution latency. Test database URL is configurable via `TEST_DATABASE_URL` (default `postgresql+psycopg://sma:sma@127.0.0.1:15432/sma_test`). Inside Docker Compose, the database host remains `postgres:5432`.
 
@@ -68,6 +68,10 @@ Milestones:
 
 | Date | ID | Decision | Why | Docs updated |
 |---|---|---|---|---|
+| 2026-11-14 | B1-10-1 | OpenAPI lists only the `/api/v1` routes. The root aliases (`/auth/...`, `/workspaces/...`, `/admin/...`) still work but use `include_in_schema=False`. `/health*` stay at the root, tag `health`. | ARCHITECTURE.md section 8 defines `/api/v1` as the API surface; registering each router twice showed every route twice in `/docs` and would double a generated client in B6-01. | ARCHITECTURE.md, README.md |
+| 2026-11-14 | B1-10-2 | Errors are documented through `app/api/docs.py::errors(...)` and a shared `ErrorResponse` schema, replacing FastAPI's default 422 `HTTPValidationError` (`{detail: [...]}`), which did not match what the API really returns. | `/docs` must tell clients the truth; tests compare the documented codes with real responses. | ARCHITECTURE.md, AGENTS.md |
+| 2026-11-14 | B1-10-3 | Examples live in `model_config["json_schema_extra"]` on request and response models, use placeholder values only, and `tests/unit/test_openapi.py` validates every example against its model. `null` cannot appear in an example (FastAPI strips it), so null-to-clear is described in the `WorkspaceUpdate` docstring. | Examples cannot rot or leak real credentials; the validation test caught a broken `{}` example. | ARCHITECTURE.md |
+| 2026-11-14 | B1-10-4 | `Makefile` creates the venv with `$(BOOTSTRAP_PYTHON)`: `py -3.13` on Windows (unchanged), `python3.13` elsewhere, overridable. | A clean Linux clone failed at `py: No such file`; README promised `make test` works. | README.md |
 | 2026-11-14 | B1-09-1 | Exceeding `max_workspaces` returns HTTP 403 with code `workspace_limit_reached` and `details {limit, current}` (via the existing `LimitExceededError`, which defaults to 400 but accepts a status). | A quota is a policy refusal, not a malformed request (400), a conflict (409, used for duplicate names) or a retry-later case (429). The stable `code` lets clients tell it apart from a permissions 403. | ARCHITECTURE.md, DATABASE.md |
 | 2026-11-14 | B1-09-2 | Effective limit per field: user's non-null `user_limits` value, else `system_settings.default_*`, else code fallback (`FALLBACK_DEFAULTS` in `services/usage.py`, equal to the seeded values; a unit test keeps them in sync). `0` is valid; negative/non-int/bool values are ignored with a warning. | DATABASE.md 4.17 says defaults live in code; a missing or corrupted setting must not disable quotas. | DATABASE.md |
 | 2026-11-14 | B1-09-3 | `audit.log(db, actor, action, entity_type, entity_id, meta, ip_address)` only adds the row (no commit) and redacts sensitive `meta` keys. The signature differs slightly from the sketch in TASKS (`db` explicit, `entity` split in two) to fit the sync-session style of the other services. It fills the existing `audit_logs.ip_address` column. | Entry and action commit atomically (tested); secrets can never reach the audit trail. | DATABASE.md |
@@ -94,6 +98,9 @@ Milestones:
 ## 8. Known issues, blockers, open questions
 
 **Known issues / tech debt:**
+- Test-suite hygiene found in B1-10 (not fixed, out of scope): (a) the `client` fixture in `tests/integration/test_password_reset.py` is unused and its rate-limit patch is a no-op (it patches `app.core.ratelimit`, but the router imports the function by name; patch `app.api.v1.auth.check_password_reset_rate_limits` as the new tests do); (b) every integration test file repeats ~70 lines of database setup, a shared `tests/conftest.py` would remove that; (c) `ruff format --check` still flags `services/seed.py` and `tests/integration/test_admin_seed.py` (pre-existing).
+- Lines still uncovered in auth/workspaces code are intentional: the SQLite-only naive-datetime branch in `AuthService.refresh`, two defensive "user row missing" branches that the foreign-key cascade makes unreachable, and the Redis client constructor (always patched in tests).
+- `docker compose` and `make dev` were not run in the sandbox (no Docker); the API was verified with uvicorn against local Postgres 16 and Redis instead.
 - Every admin request to another user's workspace writes an `audit_logs` row (reads included, B1-09-4). Acceptable for v1 volumes; if admin browsing grows, consider sampling reads or a retention job.
 - `max_accounts_per_workspace` and `monthly_generation_limit` are already resolved by `usage.get_effective_limits` but are enforced only later (B3-02 for accounts, B3-05 for requests). Changing limits by an admin (`PATCH /admin/users/{id}/limits`, B5-05) must call `audit.log`.
 - The Dockerfile installs a pinned list of runtime packages by hand (including `tzdata` since B1-08). Any task that adds a runtime dependency must also update the Dockerfile, then rebuild the image with `docker compose build api`.
@@ -119,6 +126,16 @@ Template — copy for each session:
 - Next: <the precise next action — also copied to section 1>
 - Watch out: <gotchas, flaky tests, decisions the next agent must know>
 ```
+
+### 2026-11-14 — Claude (chat, cloned the public repo) — B1-10
+- Did: B1 test sweep and OpenAPI check.
+  - OpenAPI: `schemas/errors.py` (`ErrorResponse`), `api/docs.py` (`errors()` helper, `ErrorDoc`), examples on all auth/workspace models, `responses=errors(...)` on every route, API description and tag metadata plus `health` tag in `main.py`, root aliases hidden from the schema.
+  - Tests (+138): `tests/unit/test_openapi.py` (contract), `tests/unit/test_auth_edge_cases.py` (JWT edge cases, limiter fails closed, 429/503 envelope), additions to `test_auth_api.py` (deleted/inactive user, logout idempotency, HTTP end-to-end password reset, no-enumeration check), `test_workspaces_api.py` (rename race), `test_workspace_schemas.py`.
+  - Makefile `BOOTSTRAP_PYTHON`; README steps updated; `AGENTS.md` rule 5 and `ARCHITECTURE.md` section 8 describe the OpenAPI conventions.
+- State: `ruff check` clean; 346 passed, 0 skipped (Postgres 16 on 15432 + Redis). Clean clone (`git clone`, copy `.env.example`, `make test`, `make lint`, `make migrate`, `make seed` twice) all worked; live uvicorn smoke test confirmed `/docs`, the 403 limit error, the 422 envelope and the admin audit rows. Branch `main`, last commit `B1-10: OpenAPI docs, test sweep and portable Makefile`.
+- Left undone: nothing for B1-10. Docker Compose was not run (no Docker in the sandbox).
+- Next: `B1-11` (JSON access logs with request id), then B1 is complete.
+- Watch out: a new route without tag/summary/examples/`errors(...)` now fails `tests/unit/test_openapi.py` on purpose. Examples must be valid instances of their model and must not contain `null` values.
 
 ### 2026-11-14 — Claude (chat, cloned the public repo) — B1-09
 - Did: Implemented limits and audit helper (FR-2a.4):

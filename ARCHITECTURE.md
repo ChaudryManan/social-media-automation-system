@@ -286,6 +286,8 @@ class MetricsCollector(Protocol):
 
 All workspace-scoped routes check ownership (`get_workspace_for_user` dependency). Admin routes require `role=admin`.
 
+**OpenAPI conventions (B1-10).** `/docs`, `/redoc` and `/openapi.json` list every route once, under `/api/v1` (the same routers are also reachable at the root for backwards compatibility but are hidden from the schema; only the `/health*` probes are documented at the root). Each route has a tag (`auth`, `workspaces`, `admin`, `health`), a summary, and request/response examples (`json_schema_extra` on the Pydantic models). Errors are documented with the real envelope `{"error": {"code", "message", "details"}}` through `app/api/docs.py::errors(...)` (shared `ErrorResponse` schema; FastAPI's default `HTTPValidationError` is not used). `tests/unit/test_openapi.py` enforces all of this and checks that examples validate against their models.
+
 | Area | Endpoints |
 |---|---|
 | Auth | `POST /auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`; `GET /auth/me` |

@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.orm import Session
 
+from app.api.docs import WORKSPACE_NOT_FOUND, ErrorDoc, errors
 from app.core.db import get_db
 from app.core.deps import get_current_user, get_workspace_for_user
 from app.core.errors import AppError
@@ -24,14 +25,25 @@ router = APIRouter(prefix="/workspaces", tags=["workspaces"])
     response_model=WorkspaceResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a workspace",
-    responses={
-        403: {
-            "description": (
-                "Workspace limit reached (error code `workspace_limit_reached`)."
-            )
-        },
-        409: {"description": "You already have a workspace with this name."},
-    },
+    responses=errors(
+        401,
+        ErrorDoc(
+            403,
+            "The user is at their workspace limit (`workspace_limit_reached`) "
+            "or the account is inactive (`user_inactive`).",
+            "workspace_limit_reached",
+            "Workspace limit reached: you can have at most 3 workspaces. "
+            "Delete one or ask an administrator to raise your limit.",
+            {"limit": 3, "current": 3},
+        ),
+        ErrorDoc(
+            409,
+            "You already have a workspace with this name (ignoring case).",
+            "workspace_name_taken",
+            "You already have a workspace with this name",
+        ),
+        422,
+    ),
 )
 def create_workspace(
     payload: WorkspaceCreate,
@@ -47,6 +59,7 @@ def create_workspace(
     "",
     response_model=WorkspaceListResponse,
     summary="List my workspaces",
+    responses=errors(401, 403, 422),
 )
 def list_workspaces(
     limit: int = Query(default=20, ge=1, le=100),
@@ -70,6 +83,7 @@ def list_workspaces(
     "/{workspace_id}",
     response_model=WorkspaceResponse,
     summary="Get a workspace",
+    responses=errors(401, 403, WORKSPACE_NOT_FOUND, 422),
 )
 def get_workspace(
     workspace: Workspace = Depends(get_workspace_for_user),
@@ -82,6 +96,18 @@ def get_workspace(
     "/{workspace_id}",
     response_model=WorkspaceResponse,
     summary="Update a workspace",
+    responses=errors(
+        401,
+        403,
+        WORKSPACE_NOT_FOUND,
+        ErrorDoc(
+            409,
+            "Another of your workspaces already has this name (ignoring case).",
+            "workspace_name_taken",
+            "You already have a workspace with this name",
+        ),
+        422,
+    ),
 )
 def update_workspace(
     payload: WorkspaceUpdate,
@@ -98,6 +124,19 @@ def update_workspace(
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
     summary="Delete a workspace (soft delete)",
+    responses=errors(
+        ErrorDoc(
+            400,
+            "`confirm=true` was not sent (`confirmation_required`).",
+            "confirmation_required",
+            "Deleting a workspace requires confirm=true",
+            {"hint": "Repeat the request with ?confirm=true"},
+        ),
+        401,
+        403,
+        WORKSPACE_NOT_FOUND,
+        422,
+    ),
 )
 def delete_workspace(
     confirm: bool = Query(

@@ -1,5 +1,6 @@
 """Integration tests for authentication endpoints."""
 
+import re
 import socket
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
@@ -426,3 +427,136 @@ def test_dual_prefix_routing(client: TestClient) -> None:
     )
     assert res_v1.status_code == 200
     assert "access_token" in res_v1.json()
+
+
+# ------------------------------------------------------- B1-10 sweep additions
+
+
+def _register(client: TestClient, email: str, password: str = "Password123!") -> dict:
+    response = client.post(
+        "/auth/register", json={"email": email, "password": password}
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+@pytest.mark.integration
+def test_valid_token_for_a_deleted_user_is_rejected(
+    client: TestClient, db: Session
+) -> None:
+    data = _register(client, "ghost@example.com")
+    db.execute(sa.delete(User).where(User.email == "ghost@example.com"))
+    db.commit()
+
+    response = client.get(
+        "/auth/me", headers={"Authorization": f"Bearer {data['access_token']}"}
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "user_not_found"
+
+
+@pytest.mark.integration
+def test_refresh_is_refused_for_a_deactivated_user(
+    client: TestClient, db: Session
+) -> None:
+    data = _register(client, "suspended@example.com")
+    user = db.scalar(sa.select(User).where(User.email == "suspended@example.com"))
+    user.is_active = False
+    db.commit()
+
+    response = client.post(
+        "/auth/refresh", json={"refresh_token": data["refresh_token"]}
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "user_inactive"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "body",
+    [None, {}, {"refresh_token": None}, {"refresh_token": "never-issued"}],
+)
+def test_logout_is_idempotent_for_missing_or_unknown_tokens(
+    client: TestClient, body: dict | None
+) -> None:
+    response = client.post("/auth/logout", json=body)
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "Successfully logged out"
+
+
+@pytest.mark.integration
+def test_password_reset_works_end_to_end_over_http(
+    client: TestClient,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """register -> forgot -> (console email) -> reset -> old creds are dead."""
+    monkeypatch.setattr(
+        "app.api.v1.auth.check_password_reset_rate_limits", lambda **_: None
+    )
+    old_password, new_password = "Password123!", "Brand-New-Passw0rd!"
+    data = _register(client, "reset.http@example.com", old_password)
+    capsys.readouterr()
+
+    forgot = client.post(
+        "/api/v1/auth/forgot-password", json={"email": "reset.http@example.com"}
+    )
+    assert forgot.status_code == 200
+    match = re.search(r"token=([A-Za-z0-9_-]+)", capsys.readouterr().out)
+    assert match is not None, "console email sender printed no reset link"
+    reset_token = match.group(1)
+
+    reset = client.post(
+        "/api/v1/auth/reset-password",
+        json={"token": reset_token, "new_password": new_password},
+    )
+
+    assert reset.status_code == 200
+    assert "Password reset successfully" in reset.json()["message"]
+    new_login = client.post(
+        "/auth/login",
+        json={"email": "reset.http@example.com", "password": new_password},
+    )
+    old_login = client.post(
+        "/auth/login",
+        json={"email": "reset.http@example.com", "password": old_password},
+    )
+    old_refresh = client.post(
+        "/auth/refresh", json={"refresh_token": data["refresh_token"]}
+    )
+    reused = client.post(
+        "/auth/reset-password",
+        json={"token": reset_token, "new_password": "Another-Passw0rd!"},
+    )
+    assert new_login.status_code == 200
+    assert old_login.status_code == 401
+    assert old_login.json()["error"]["code"] == "invalid_credentials"
+    assert old_refresh.status_code == 401
+    assert reused.status_code == 401
+    assert reused.json()["error"]["code"] == "token_already_used"
+
+
+@pytest.mark.integration
+def test_forgot_password_for_unknown_email_sends_nothing_but_looks_identical(
+    client: TestClient,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.api.v1.auth.check_password_reset_rate_limits", lambda **_: None
+    )
+    _register(client, "known@example.com")
+    capsys.readouterr()
+
+    known = client.post("/auth/forgot-password", json={"email": "known@example.com"})
+    known_output = capsys.readouterr().out
+    unknown = client.post("/auth/forgot-password", json={"email": "nobody@example.com"})
+    unknown_output = capsys.readouterr().out
+
+    assert known.status_code == unknown.status_code == 200
+    assert known.json() == unknown.json()
+    assert "token=" in known_output
+    assert "token=" not in unknown_output

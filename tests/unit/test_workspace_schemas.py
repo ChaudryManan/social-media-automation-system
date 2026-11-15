@@ -107,3 +107,14 @@ def test_update_allows_clearing_nullable_fields() -> None:
 def test_update_only_reports_sent_fields() -> None:
     data = WorkspaceUpdate(name="  New  ")
     assert data.model_dump(exclude_unset=True) == {"name": "New"}
+
+
+@pytest.mark.parametrize("field", ["default_language", "timezone"])
+def test_language_and_timezone_must_be_strings(field: str) -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceCreate(name="Brand", **{field: 123})
+
+
+def test_settings_that_are_not_json_serialisable_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="JSON serialisable"):
+        WorkspaceCreate(name="Brand", settings={"bad": object()})

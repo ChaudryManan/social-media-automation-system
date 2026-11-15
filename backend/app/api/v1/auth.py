@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.orm import Session
 
+from app.api.docs import ErrorDoc, errors
 from app.core.config import settings
 from app.core.db import get_db
 from app.core.deps import get_current_user
@@ -29,6 +30,15 @@ router = APIRouter(prefix="/auth", tags=["auth"])
     response_model=TokenResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Register a new user account",
+    responses=errors(
+        ErrorDoc(
+            409,
+            "An account with this email already exists.",
+            "user_already_exists",
+            "User with this email already exists",
+        ),
+        422,
+    ),
 )
 def register(
     payload: UserRegisterRequest,
@@ -55,6 +65,16 @@ def register(
     response_model=TokenResponse,
     status_code=status.HTTP_200_OK,
     summary="Authenticate and receive access and refresh tokens",
+    responses=errors(
+        ErrorDoc(
+            401,
+            "Wrong email or password (`invalid_credentials`).",
+            "invalid_credentials",
+            "Invalid email or password",
+        ),
+        403,
+        422,
+    ),
 )
 def login(
     payload: UserLoginRequest,
@@ -80,6 +100,17 @@ def login(
     response_model=TokenResponse,
     status_code=status.HTTP_200_OK,
     summary="Rotate refresh token and issue new access token",
+    responses=errors(
+        ErrorDoc(
+            401,
+            "Refresh token is unknown, revoked or expired "
+            "(codes: `invalid_token`, `token_expired`, `user_not_found`).",
+            "invalid_token",
+            "Invalid refresh token",
+        ),
+        403,
+        422,
+    ),
 )
 def refresh(
     payload: TokenRefreshRequest,
@@ -104,6 +135,7 @@ def refresh(
     response_model=MessageResponse,
     status_code=status.HTTP_200_OK,
     summary="Log out and invalidate the active refresh token",
+    responses=errors(422),
 )
 def logout(
     payload: UserLogoutRequest | None = None,
@@ -120,6 +152,7 @@ def logout(
     response_model=UserResponse,
     status_code=status.HTTP_200_OK,
     summary="Get current authenticated user profile",
+    responses=errors(401, 403),
 )
 def get_me(
     current_user: User = Depends(get_current_user),
@@ -138,6 +171,23 @@ _FORGOT_PASSWORD_RESPONSE = (
     response_model=MessageResponse,
     status_code=status.HTTP_200_OK,
     summary="Request a password reset link",
+    responses=errors(
+        422,
+        ErrorDoc(
+            429,
+            "Too many requests from this address or for this account "
+            "(codes: `rate_limit_exceeded`, `rate_limit_cooldown`).",
+            "rate_limit_exceeded",
+            "Too many password reset requests from this address.",
+        ),
+        ErrorDoc(
+            503,
+            "The rate limiter (Redis) is unavailable; the request fails closed "
+            "(`service_unavailable`).",
+            "service_unavailable",
+            "Service temporarily unavailable. Please try again later.",
+        ),
+    ),
 )
 def forgot_password(
     payload: ForgotPasswordRequest,
@@ -161,6 +211,16 @@ def forgot_password(
     response_model=MessageResponse,
     status_code=status.HTTP_200_OK,
     summary="Reset password using a valid reset token",
+    responses=errors(
+        ErrorDoc(
+            401,
+            "Reset token is invalid, already used or expired "
+            "(codes: `token_invalid`, `token_already_used`, `token_expired`).",
+            "token_invalid",
+            "Invalid password reset token.",
+        ),
+        422,
+    ),
 )
 def reset_password(
     payload: ResetPasswordRequest,

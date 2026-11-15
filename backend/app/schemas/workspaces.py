@@ -15,6 +15,21 @@ LANGUAGE_REGEX = re.compile(r"^[A-Za-z][A-Za-z0-9-]{1,9}$")
 MAX_SETTINGS_JSON_CHARS = 10_000
 NON_NULLABLE_UPDATE_FIELDS = ("name", "default_language", "timezone")
 
+WORKSPACE_EXAMPLE = {
+    "id": "7b0e2f9c-52d4-4a0e-8c3b-1f6a9d4e2b77",
+    "owner_id": "3f1c9a4e-6b1d-4c2a-9a55-0d2f7e8b1c10",
+    "name": "Karachi Cafe",
+    "description": "Neighbourhood coffee shop",
+    "brand_voice": "Friendly, short sentences, light humour",
+    "default_language": "ur",
+    "timezone": "Asia/Karachi",
+    "default_platforms": ["instagram", "facebook"],
+    "settings": {"posting_hours": [9, 18]},
+    "is_suspended": False,
+    "created_at": "2026-11-14T09:30:00Z",
+    "updated_at": "2026-11-14T09:30:00Z",
+}
+
 
 class _WorkspaceFieldValidators(BaseModel):
     """Shared normalisation and validation rules for workspace input fields."""
@@ -100,6 +115,23 @@ class _WorkspaceFieldValidators(BaseModel):
 class WorkspaceCreate(_WorkspaceFieldValidators):
     """Payload for creating a workspace."""
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {"name": "My Brand"},
+                {
+                    "name": "Karachi Cafe",
+                    "description": "Neighbourhood coffee shop",
+                    "brand_voice": "Friendly, short sentences, light humour",
+                    "default_language": "ur",
+                    "timezone": "Asia/Karachi",
+                    "default_platforms": ["instagram", "facebook"],
+                    "settings": {"posting_hours": [9, 18]},
+                },
+            ]
+        }
+    )
+
     name: str = Field(..., min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=1000)
     brand_voice: str | None = Field(default=None, max_length=2000)
@@ -110,7 +142,22 @@ class WorkspaceCreate(_WorkspaceFieldValidators):
 
 
 class WorkspaceUpdate(_WorkspaceFieldValidators):
-    """Payload for a partial workspace update (only sent fields change)."""
+    """Payload for a partial workspace update (only sent fields change).
+
+    Send at least one field. Sending `null` clears the optional fields
+    (`description`, `brand_voice`, `default_platforms`, `settings`); `name`,
+    `default_language` and `timezone` cannot be null.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {"brand_voice": "Warm and playful"},
+                {"name": "Karachi Cafe & Bakery", "timezone": "Asia/Karachi"},
+                {"default_platforms": ["instagram", "facebook"]},
+            ]
+        }
+    )
 
     name: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=1000)
@@ -137,7 +184,10 @@ class WorkspaceUpdate(_WorkspaceFieldValidators):
 class WorkspaceResponse(BaseModel):
     """Workspace representation returned by the API."""
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(
+        from_attributes=True,
+        json_schema_extra={"examples": [WORKSPACE_EXAMPLE]},
+    )
 
     id: UUID
     owner_id: UUID
@@ -155,6 +205,19 @@ class WorkspaceResponse(BaseModel):
 
 class WorkspaceListResponse(BaseModel):
     """Paginated list of workspaces."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "items": [WORKSPACE_EXAMPLE],
+                    "total": 1,
+                    "limit": 20,
+                    "offset": 0,
+                }
+            ]
+        }
+    )
 
     items: list[WorkspaceResponse]
     total: int

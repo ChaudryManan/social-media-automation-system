@@ -4,6 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, status
 
+from app.api.docs import ErrorDoc, errors
 from app.core.deps import require_admin
 from app.models.users import User
 
@@ -14,6 +15,16 @@ router = APIRouter(prefix="/admin", tags=["admin"])
     "/test",
     status_code=status.HTTP_200_OK,
     summary="Admin-only dummy verification endpoint",
+    responses=errors(
+        401,
+        ErrorDoc(
+            403,
+            "The caller is not an administrator (`admin_required`) or the "
+            "account is inactive (`user_inactive`).",
+            "admin_required",
+            "Administrator privileges required",
+        ),
+    ),
 )
 def admin_test(
     current_admin: User = Depends(require_admin),

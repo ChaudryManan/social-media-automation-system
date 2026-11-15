@@ -293,6 +293,27 @@ def test_concurrent_duplicate_is_mapped_to_conflict(
     assert client.get("/workspaces", headers=headers).status_code == 200
 
 
+@pytest.mark.integration
+def test_concurrent_duplicate_rename_is_mapped_to_conflict(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rename that races past the pre-check still hits the unique index."""
+    _, headers = _make_user(db, "owner@example.com")
+    _create(client, headers, name="Brand A")
+    other = _create(client, headers, name="Brand B")
+    monkeypatch.setattr(WorkspaceService, "_name_taken", lambda *a, **k: False)
+
+    response = client.patch(
+        f"/workspaces/{other['id']}", json={"name": "Brand A"}, headers=headers
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "workspace_name_taken"
+    monkeypatch.undo()
+    fetched = client.get(f"/workspaces/{other['id']}", headers=headers)
+    assert fetched.json()["name"] == "Brand B"  # rolled back, session still usable
+
+
 # ----------------------------------------------------------------------- list
 
 
