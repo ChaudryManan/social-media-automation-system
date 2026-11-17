@@ -354,6 +354,8 @@ Runtime-tunable values (retry limits, lead times, metrics schedule, quotas, plat
 ## 11. Observability and errors
 
 - JSON logs with `request_id`, `run_id`, `node`, `attempt`.
+- HTTP access log (B1-11): `AccessLogMiddleware` writes exactly one JSON line per request to the `app.access` logger with `request_id`, `method`, `path` (no query string), `route` (matched template), `status_code`, `duration_ms` and `client_ip`; level INFO, ERROR for 5xx/unhandled errors, WARNING if the client left before a response. Middleware order (outer to inner): `RequestIDMiddleware` -> `AccessLogMiddleware` -> CORS -> routes, so CORS preflights are logged too. Bodies, headers and query strings are never logged. Uvicorn's own access log is disabled (`--no-access-log` and in `setup_logging`) and its startup/shutdown lines are routed through the same JSON formatter, so API container output is JSON only.
+- `JSONFormatter` copies only an allow-list of `extra=` fields (`STRUCTURED_FIELDS` in `core/logging.py`); any other `extra=` value is ignored on purpose because some call sites pass email addresses. Add a field to the allow-list only if it can never hold personal data or secrets.
 - Every node attempt → `agent_steps` (verdict, feedback, tokens, cost, latency). Admin monitoring endpoints read from it.
 - Domain errors derive from `AppError(code, message, http_status)`; one exception handler maps them to the error format.
 - Celery tasks: bounded retries with exponential backoff for retriable errors; non-retriable errors set status `failed` and notify.

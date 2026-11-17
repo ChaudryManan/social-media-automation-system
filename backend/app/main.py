@@ -12,7 +12,7 @@ from app.api.v1.workspaces import router as workspaces_router
 from app.core.config import settings
 from app.core.errors import register_error_handlers
 from app.core.logging import setup_logging
-from app.core.middleware import RequestIDMiddleware
+from app.core.middleware import AccessLogMiddleware, RequestIDMiddleware
 
 API_DESCRIPTION = """\
 Backend API for the Social Media Multi-Agent Automation Platform.
@@ -94,9 +94,9 @@ def create_app() -> FastAPI:
         openapi_tags=OPENAPI_TAGS,
     )
 
-    # Middleware execution order: RequestIDMiddleware runs on all requests;
-    # CORSMiddleware handles cross-origin preflight and headers.
-    application.add_middleware(RequestIDMiddleware)
+    # add_middleware() wraps the app, so the LAST one added is the OUTERMOST.
+    # Request flow: RequestID (sets the id, adds X-Request-ID) -> AccessLog (one
+    # JSON line per request, including CORS preflights) -> CORS -> routes.
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ORIGINS,
@@ -105,6 +105,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
         expose_headers=["X-Request-ID"],
     )
+    application.add_middleware(AccessLogMiddleware)
+    application.add_middleware(RequestIDMiddleware)
 
     register_error_handlers(application)
 

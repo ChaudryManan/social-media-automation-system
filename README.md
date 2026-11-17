@@ -22,3 +22,6 @@ Docker Desktop with WSL2 is required for the development stack.
 
 ### API documentation
 With the stack running, open `http://localhost:8000/docs` (Swagger UI) or `/redoc`; the raw contract is `/openapi.json`. All endpoints are served under `/api/v1` (health probes stay at the root). Click **Authorize** and paste the `access_token` from `POST /api/v1/auth/login` to call protected routes. Every error uses `{"error": {"code", "message", "details"}}`.
+
+### Logs
+The API writes one JSON object per line to stdout, including Uvicorn's own startup messages. Each HTTP request produces exactly one access line (logger `app.access`) with `request_id`, `method`, `path`, `route`, `status_code`, `duration_ms` and `client_ip`; send `X-Request-ID` to choose your own id, otherwise one is generated and returned in the `X-Request-ID` response header. Example: `docker compose logs -f api` (add `| jq` for pretty output). Query strings, headers and bodies are never logged.

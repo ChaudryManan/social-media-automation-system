@@ -34,7 +34,7 @@ Goal: runnable backend with auth, roles, workspaces and limits.
   **Done when:** creating workspace number limit+1 returns a clear 4xx error. **Dep:** B1-08.
 - [x] **B1-10 B1 test sweep and OpenAPI check** — coverage of auth/workspaces; `/docs` shows all routes with tags and examples.
   **Done when:** `make test` green; CI-style run from a clean clone works using README steps. **Dep:** B1-01…B1-09.
-- [ ] **B1-11 Uvicorn access logs in JSON with request id** — Configure Uvicorn / middleware so that API access logs are emitted as JSON lines that include request_id (e.g. disable Uvicorn's default access log and emit one structured line per request from middleware).
+- [x] **B1-11 Uvicorn access logs in JSON with request id** — Configure Uvicorn / middleware so that API access logs are emitted as JSON lines that include request_id (e.g. disable Uvicorn's default access log and emit one structured line per request from middleware).
   **Done when:** the API container's access logs are JSON lines that include request_id. **Dep:** B1-03.
 
 ## Phase B2 — Agent engine, post flow (M6, M7)

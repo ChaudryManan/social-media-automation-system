@@ -1,5 +1,6 @@
 """Alembic environment configuration."""
 
+import logging
 from logging.config import fileConfig
 
 import app.models  # noqa: F401 - load all models for target_metadata
@@ -10,8 +11,13 @@ from sqlalchemy import engine_from_config, pool
 
 config = context.config
 
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+# Apply alembic.ini's logging only when this process has no logging set up yet
+# (the `alembic` CLI). When migrations run inside the app or the test suite the
+# app's JSON logging is already configured; fileConfig() would otherwise replace
+# its handlers and, by default, disable every existing logger (including the
+# access log). disable_existing_loggers=False is kept as a second safeguard.
+if config.config_file_name is not None and not logging.getLogger().handlers:
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 if not config.get_main_option("sqlalchemy.url"):
     config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)

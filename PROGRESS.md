@@ -7,10 +7,10 @@
 
 ## 1. NEXT ACTION (one precise step)
 
-> **Start task `B1-11` (Uvicorn access logs in JSON with request id) in `TASKS.md`.**
-> Disable Uvicorn's default access log (`--no-access-log`, in `docker-compose.yml` and any Dockerfile CMD) and emit exactly one structured JSON line per request from `core/middleware.py` with `request_id`, method, path, status and duration (the request-id middleware and JSON logging already exist from B1-03; extend them rather than adding a new mechanism). Never log request bodies, `Authorization` headers or tokens. Done when: the API container's access logs are JSON lines that include `request_id`. Then B1 is complete and the next task is `B2-01`.
+> **Start task `B2-01` (LLM wrapper) in `TASKS.md`. Phase B1 is complete.**
+> Read `AGENT_SPECS.md` sections 1-5 first (required by the B2 header in `TASKS.md`), then build `backend/app/agents/llm.py`: `get_chat_model(kind)`, `generate_structured(schema, messages)` (Pydantic output with one repair retry), a usage/cost capture hook and a scripted `fake` provider that can be told to fail N times. Model names and the provider come from `core/config.py` settings (`LLM_PROVIDER`, `LLM_MODEL_TEXT`, `LLM_MODEL_FAST`), never hard-coded; tests must force `LLM_PROVIDER=fake` themselves (no network): `.env.example` sets `LLM_PROVIDER=gemini` while the code default is `fake`, so a developer's `.env` may select gemini. Any new runtime dependency must also be added to the Dockerfile pip list. Done when: tests prove fake-provider scripting and structured-output parsing. Do not start B2-02 in the same change.
 
-Last updated: 2026-11-14 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B1-10: OpenAPI docs, test sweep and portable Makefile`
+Last updated: 2026-11-15 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B1-11: JSON access logs with request id`
 
 ## 2. How to resume (any agent)
 
@@ -24,7 +24,7 @@ Last updated: 2026-11-14 · Last agent: Claude (chat, via cloned repo) · Branch
 | Phase | Scope | Status | Done / Total |
 |---|---|---|---|
 | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
-| B1 | Foundation: auth, roles, workspaces, limits | In progress | 10 / 11 |
+| B1 | Foundation: auth, roles, workspaces, limits | Done | 11 / 11 |
 | B2 | Agent engine (post flow) | Not started | 0 / 13 |
 | B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 18 |
 | B4 | Video flow | Not started | 0 / 10 |
@@ -43,6 +43,7 @@ Milestones:
 
 ## 5. Recently completed (newest first, keep last ~10)
 
+- 2026-11-15 — B1-11 completed: JSON access logs with request id (phase B1 done). New pure-ASGI `AccessLogMiddleware` writes one JSON line per request (logger `app.access`: `request_id`, `method`, `path`, `route`, `status_code`, `duration_ms`, `client_ip`; ERROR for 5xx/unhandled, WARNING if the client disconnects). Order is RequestID -> AccessLog -> CORS so preflights are logged. Uvicorn's access log is disabled (`--no-access-log` in compose and in `setup_logging`) and its startup lines now go through the JSON formatter. Fixed `alembic/env.py`, whose `fileConfig()` disabled every existing logger (the access log included) when migrations ran in-process. +30 tests (376 passed, 0 skipped), including a test that starts a real Uvicorn process and checks every output line is JSON.
 - 2026-11-14 — B1-10 completed: B1 test sweep and OpenAPI check. `/docs` now lists each of the 15 operations once under `/api/v1` with tags, summaries, request/response examples and documented errors in the real `{"error": {...}}` envelope (`schemas/errors.py`, `api/docs.py::errors`); root aliases hidden from the schema. Coverage sweep added 138 tests (suite 208 -> 346 passed, 0 skipped with Postgres and Redis): OpenAPI contract tests, JWT edge cases, reset rate-limiter failing closed, HTTP end-to-end password reset, deleted/inactive user paths, rename race. Auth/workspaces/limits/audit modules are at 98-100% line coverage. Makefile made portable (`BOOTSTRAP_PYTHON`), verified from a clean clone: README steps, `make test`, `make lint`, `make migrate`, `make seed`, and a live server smoke test.
 - 2026-11-14 — B1-09 completed: Limits and audit helper. `services/usage.py` (`get_effective_limits`: `user_limits` override, else `system_settings` default, else code fallback 3/5/100; `count_workspaces`; `ensure_can_create_workspace`), `services/audit.py::log` (adds an `audit_logs` row without committing; redacts sensitive `meta` keys). `WorkspaceService.create` locks the owner row and enforces `max_workspaces` (creating workspace number limit+1 gives 403 `workspace_limit_reached` with `details {limit, current}`); `WorkspaceService.soft_delete` now takes the actor and logs `workspace.delete` in the same transaction; `get_workspace_for_user` logs `workspace.admin_access` when an admin reaches someone else's workspace. 39 new tests (24 unit, 15 integration incl. a two-thread race test); full suite 208 passed.
 - 2026-11-14 — B1-08 completed: Workspaces CRUD. `POST/GET /workspaces`, `GET/PATCH/DELETE /workspaces/{id}` (dual-mounted with `/api/v1`), schemas with validation (`schemas/workspaces.py`: trimmed name, IANA timezone, language tag, platform list, settings size cap, unknown fields rejected), `WorkspaceService` (`services/workspaces.py`: case-insensitive unique name per owner with DB-index race fallback, paginated own-list, partial update that can clear nullable fields, soft delete), `get_workspace_for_user` dependency in `core/deps.py` (owner or admin; anything else is 404). Delete requires `?confirm=true`. 79 new tests (35 unit, 44 integration); full suite 169 passed.
@@ -52,7 +53,6 @@ Milestones:
 - 2026-11-14 — B1-04 completed: Database and first migration. Added SQLAlchemy 2.0 sync engine + Base + session dependency (`core/db.py`), 6 foundation models (`users`, `refresh_tokens`, `user_limits`, `workspaces`, `audit_logs`, `system_settings`), Alembic configuration and initial migration (`0001_initial_schema`), `make migrate`/`downgrade`/`migration` targets, model unit tests and migration upgrade/downgrade integration test (23 tests total passing). Resolved host IPv6 port resolution delay by standardizing on `127.0.0.1:15432`.
 - 2026-11-14 — B1-03 completed: Core infrastructure with typed pydantic-settings, structured JSON logging with request-ID propagation, AppError hierarchy with global exception handlers (including 422 mapping), and CORS middleware.
 - 2026-11-13 — B1-02 completed: Compose services and healthchecks, minimal FastAPI liveness/readiness endpoints, health tests, and Windows-friendly first-start timing.
-- 2026-11-13 — B1-01 completed: repository package scaffold, pinned Python tooling, project-local `.venv` Make targets, environment template, and placeholder test.
 
 ## 6. Environment and how to run
 
@@ -68,6 +68,11 @@ Milestones:
 
 | Date | ID | Decision | Why | Docs updated |
 |---|---|---|---|---|
+| 2026-11-15 | B1-11-1 | Access logging is a separate pure-ASGI `AccessLogMiddleware` (not an extension of the `BaseHTTPMiddleware`-based `RequestIDMiddleware`). Stack, outer to inner: RequestID -> AccessLog -> CORS. `duration_ms` runs until the app finishes sending the response. | Pure ASGI sees the real status, route template and failures without buffering responses; being inside RequestID it reads `request_id` from the logging context, and being outside CORS it also logs preflights (which now get an `X-Request-ID` header too). | ARCHITECTURE.md |
+| 2026-11-15 | B1-11-2 | `JSONFormatter` copies only an allow-list of `extra=` fields (`STRUCTURED_FIELDS`), it does not dump every extra. Existing `extra=` values elsewhere stay unlogged as before. | Several call sites pass `email`/`to` (`services/auth.py`, `providers/email.py`, `services/seed.py`); dumping all extras would have started writing personal data to the logs. | ARCHITECTURE.md, AGENTS.md |
+| 2026-11-15 | B1-11-3 | Every request is logged, health probes included (level INFO), and 4xx are INFO, not WARNING. Query string, headers and bodies are never logged; the path is capped at 2048 characters. | Matches the task ("one line per request"); 401/404 are routine client errors and would drown real warnings. | ARCHITECTURE.md, README.md |
+| 2026-11-15 | B1-11-4 | `setup_logging` also disables `uvicorn.access` and routes `uvicorn`/`uvicorn.error` to the JSON root handler; compose runs the API with `--no-access-log` as well. | Output is JSON only and each request is logged once even if the flag is forgotten; both variants are tested against a real server process. | ARCHITECTURE.md, README.md |
+| 2026-11-15 | B1-11-5 | `alembic/env.py` calls `fileConfig(..., disable_existing_loggers=False)` and only when the process has no root handlers yet (plain `alembic` CLI). | The default silently disabled all app loggers and replaced the JSON handler whenever migrations ran in-process (this broke the new tests in a full run). | - |
 | 2026-11-14 | B1-10-1 | OpenAPI lists only the `/api/v1` routes. The root aliases (`/auth/...`, `/workspaces/...`, `/admin/...`) still work but use `include_in_schema=False`. `/health*` stay at the root, tag `health`. | ARCHITECTURE.md section 8 defines `/api/v1` as the API surface; registering each router twice showed every route twice in `/docs` and would double a generated client in B6-01. | ARCHITECTURE.md, README.md |
 | 2026-11-14 | B1-10-2 | Errors are documented through `app/api/docs.py::errors(...)` and a shared `ErrorResponse` schema, replacing FastAPI's default 422 `HTTPValidationError` (`{detail: [...]}`), which did not match what the API really returns. | `/docs` must tell clients the truth; tests compare the documented codes with real responses. | ARCHITECTURE.md, AGENTS.md |
 | 2026-11-14 | B1-10-3 | Examples live in `model_config["json_schema_extra"]` on request and response models, use placeholder values only, and `tests/unit/test_openapi.py` validates every example against its model. `null` cannot appear in an example (FastAPI strips it), so null-to-clear is described in the `WorkspaceUpdate` docstring. | Examples cannot rot or leak real credentials; the validation test caught a broken `{}` example. | ARCHITECTURE.md |
@@ -98,6 +103,9 @@ Milestones:
 ## 8. Known issues, blockers, open questions
 
 **Known issues / tech debt:**
+- Health probes are logged like any request (docker healthcheck every 10 s). If that becomes noisy in production, add an exclusion list for `/health` and `/health/ready` to `AccessLogMiddleware` (setting in `core/config.py`).
+- The access line has no `user_id` (authentication runs inside route dependencies, after the middleware starts). If needed later, have `get_current_user` store the id in `request.state` and read it when logging.
+- `extra=` values on existing log calls (user ids, workspace ids, rate-limit counters) are still not written to the logs because of the allow-list (B1-11-2). Add individual safe fields to `STRUCTURED_FIELDS` deliberately if they are wanted.
 - Test-suite hygiene found in B1-10 (not fixed, out of scope): (a) the `client` fixture in `tests/integration/test_password_reset.py` is unused and its rate-limit patch is a no-op (it patches `app.core.ratelimit`, but the router imports the function by name; patch `app.api.v1.auth.check_password_reset_rate_limits` as the new tests do); (b) every integration test file repeats ~70 lines of database setup, a shared `tests/conftest.py` would remove that; (c) `ruff format --check` still flags `services/seed.py` and `tests/integration/test_admin_seed.py` (pre-existing).
 - Lines still uncovered in auth/workspaces code are intentional: the SQLite-only naive-datetime branch in `AuthService.refresh`, two defensive "user row missing" branches that the foreign-key cascade makes unreachable, and the Redis client constructor (always patched in tests).
 - `docker compose` and `make dev` were not run in the sandbox (no Docker); the API was verified with uvicorn against local Postgres 16 and Redis instead.
@@ -126,6 +134,17 @@ Template — copy for each session:
 - Next: <the precise next action — also copied to section 1>
 - Watch out: <gotchas, flaky tests, decisions the next agent must know>
 ```
+
+### 2026-11-15 — Claude (chat, cloned the public repo) — B1-11
+- Did: JSON access logs with request id.
+  - `core/middleware.py`: `AccessLogMiddleware` (one line per request, `app.access` logger). `core/logging.py`: `STRUCTURED_FIELDS` allow-list, `default=str`, and `setup_logging` now silences `uvicorn.access` and routes Uvicorn's other logs through the JSON handler. `main.py`: middleware order RequestID -> AccessLog -> CORS. `docker-compose.yml`: `--no-access-log` on the API command.
+  - `backend/alembic/env.py`: `fileConfig` no longer disables existing loggers or replaces the app's handlers (root cause of 19 failures that only appeared in a full test run).
+  - Tests (+30): `tests/unit/test_access_log.py` (fields, request id, levels, route template, duration, preflight, no secrets, path truncation and log-injection, ASGI edge cases, allow-list privacy guard, uvicorn logger setup, alembic regression) and `tests/unit/test_uvicorn_json_logs.py` (real Uvicorn process with and without `--no-access-log`; every output line must be JSON; compose flag check). Mutation-checked: 7 deliberate breakages of the implementation were each caught.
+  - Docs: `TASKS.md` (B1-11 ticked), `ARCHITECTURE.md` section 11, `AGENTS.md` logging rule, `README.md` Logs section, this file.
+- State: `ruff check` clean; 376 passed, 0 skipped (Postgres 16 on 15432 + Redis); `middleware.py` 100% covered. Branch `main`, last commit `B1-11: JSON access logs with request id`. Phase B1 is complete (11/11).
+- Left undone: Docker was not available, so `docker compose up` (the container's actual log output) was not run; the same command line was run directly with `python -m uvicorn app.main:app --no-access-log` and every output line was valid JSON.
+- Next: `B2-01` (LLM wrapper); read `AGENT_SPECS.md` sections 1-5 first.
+- Watch out: do not add `extra=` fields to the allow-list if they can hold emails, tokens or prompts. Anything that calls `logging.config.fileConfig`/`dictConfig` in-process can disable the app loggers again; the alembic regression test guards that path.
 
 ### 2026-11-14 — Claude (chat, cloned the public repo) — B1-10
 - Did: B1 test sweep and OpenAPI check.

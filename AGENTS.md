@@ -53,7 +53,7 @@
 - Format/lint with ruff (`make format`, `make lint`). Keep functions small and named for what they do.
 - Config only through `core/config.py` (pydantic-settings). No `os.environ` reads elsewhere. No hard-coded model names, URLs or limits — use settings/`system_settings`.
 - Errors: raise `AppError` subclasses with a stable `code`; never leak stack traces to clients.
-- Logging: structured; include `request_id`/`run_id`/`node`. Never log tokens, passwords, full prompts with user secrets.
+- Logging: structured; include `request_id`/`run_id`/`node`. Never log tokens, passwords, full prompts with user secrets. `JSONFormatter` only emits allow-listed `extra=` fields (`STRUCTURED_FIELDS`), so putting a value in `extra=` does not by itself log it.
 - Time: UTC everywhere; use timezone-aware datetimes; convert only at the edges.
 - IDs: UUIDs. Pagination: `limit`/`offset` returning `{items, total}`.
 - Idempotency: jobs and publishing must be safe to run twice. Check state before side effects.
