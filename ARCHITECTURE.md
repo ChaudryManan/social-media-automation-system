@@ -255,6 +255,16 @@ def make_checked_node(key: str, agent_fn, check_fn, max_retries: int):
 - Resume with `graph.invoke(Command(resume=payload), config={"configurable": {"thread_id": request_id}})` from a Celery task (`workflow.resume`). Never run the graph inside an API request.
 - Because DB is the source of truth for status, a lost checkpoint can be recovered by re-queuing from the last good status (documented in runbook section 12).
 
+### 6.6 LLM layer (`app/agents/llm.py`, B2-01)
+
+Agents never import a model SDK; they call this module only.
+
+- `get_chat_model(kind)` with `kind` = `"text"` (strong, `LLM_MODEL_TEXT`) or `"fast"` (cheap, `LLM_MODEL_FAST`; falls back to the text model when unset). Provider from `LLM_PROVIDER`. Providers are plugged in with `register_provider(name, factory)`; a provider subclasses `ChatModel` and implements `_generate()` only. Today only `fake` is registered; any other value raises `LLMConfigError` (`llm_not_configured`).
+- `generate_structured(schema, messages, kind=, temperature=)` returns a validated Pydantic object. If the reply is not valid JSON or fails validation it asks once more (`MAX_REPAIR_RETRIES = 1`) with the problem and the JSON schema; then raises `LLMOutputError` (`llm_invalid_output`). Provider failures raise `LLMProviderError` (`retriable` flag) and are **not** retried here: retry/escalation belongs to the checked-node pattern (6.3).
+- `capture_usage()` is a context manager returning a `UsageRecorder` (calls, `tokens_in`, `tokens_out`, `cost_usd`, `latency_ms`, `models`) for every successful call made inside it; recorders nest and are per-context. The checked node (B2-04) copies these into `agent_steps`.
+- `fake` provider: `get_fake_script()` returns the shared `FakeScript` (`queue(...)`, `fail_next(n)`, `set_default(...)`, `calls`, `reset()`). An unscripted call raises `fake_llm_script_exhausted` so tests cannot pass by accident. Tests use the `fake_llm` fixture in `tests/conftest.py`, which forces `LLM_PROVIDER=fake` regardless of `.env`.
+- Prompts and model replies are never logged and never appear in error messages or details; the log line carries provider, model, kind, token counts and latency only.
+
 ## 7. Interfaces (extension points)
 
 ```python
@@ -327,7 +337,7 @@ REFRESH_TOKEN_DAYS=14
 FERNET_KEY=generate-with-cryptography
 CORS_ORIGINS=http://localhost:3000
 
-LLM_PROVIDER=gemini                # gemini | fake
+LLM_PROVIDER=fake                  # fake (offline, default) | gemini (planned, not implemented yet)
 GEMINI_API_KEY=
 LLM_MODEL_TEXT=                    # set explicitly; do not hard-code in code
 LLM_MODEL_FAST=

@@ -10,6 +10,7 @@
 
 ### 1.1 Structured output
 - Every LLM call that feeds the workflow returns a **Pydantic model** through `generate_structured(schema, messages)` (one automatic repair retry on invalid JSON). Free-form text is only allowed inside string fields.
+- Provider failures (`LLMProviderError`) are not repaired or retried by `generate_structured`; the checked node decides (ARCHITECTURE 6.3, 6.6). After the repair attempt fails it raises `LLMOutputError`.
 - All schemas below are the contract. Field names are fixed; add optional fields only with a doc update.
 - Every output model includes `language: str` (BCP-47 or plain name, e.g. `en`, `ur`, `roman-ur`) when it contains user-facing text.
 

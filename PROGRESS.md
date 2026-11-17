@@ -7,10 +7,10 @@
 
 ## 1. NEXT ACTION (one precise step)
 
-> **Start task `B2-01` (LLM wrapper) in `TASKS.md`. Phase B1 is complete.**
-> Read `AGENT_SPECS.md` sections 1-5 first (required by the B2 header in `TASKS.md`), then build `backend/app/agents/llm.py`: `get_chat_model(kind)`, `generate_structured(schema, messages)` (Pydantic output with one repair retry), a usage/cost capture hook and a scripted `fake` provider that can be told to fail N times. Model names and the provider come from `core/config.py` settings (`LLM_PROVIDER`, `LLM_MODEL_TEXT`, `LLM_MODEL_FAST`), never hard-coded; tests must force `LLM_PROVIDER=fake` themselves (no network): `.env.example` sets `LLM_PROVIDER=gemini` while the code default is `fake`, so a developer's `.env` may select gemini. Any new runtime dependency must also be added to the Dockerfile pip list. Done when: tests prove fake-provider scripting and structured-output parsing. Do not start B2-02 in the same change.
+> **Start task `B2-02` (migration for `workflow_runs` and `agent_steps`) in `TASKS.md`. `B2-01` is done.**
+> Add Alembic migration `0002` (never edit `0001`), SQLAlchemy models in `backend/app/models/` and a small service (e.g. `services/runs.py`) that creates a run and records one `agent_steps` row per attempt, exactly as in `DATABASE.md` 4.10 and 4.11 (text+CHECK enums `run_status`/`step_verdict`, UUID PKs, UTC timestamps, indexes from section 5, `agent_steps.run_id` FK `ON DELETE CASCADE`). Note `workflow_runs.request_id` references `content_requests`, which only arrives in B3: create `request_id` as a plain indexed UUID column now and add the FK in the B3 migration (record this in Decisions), or ask the human. The step recorder should accept the numbers that `llm.capture_usage()` already provides (`tokens_in`, `tokens_out`, `cost_usd`, `latency_ms`, `models`). Done when: inserting and querying a run with steps works (needs Postgres on 15432; start it with `docker compose up -d postgres redis`), migration upgrade/downgrade test passes. Do not start B2-03 in the same change.
 
-Last updated: 2026-11-15 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B1-11: JSON access logs with request id`
+Last updated: 2026-11-17 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B2-01: LLM wrapper with scripted fake provider`
 
 ## 2. How to resume (any agent)
 
@@ -25,7 +25,7 @@ Last updated: 2026-11-15 · Last agent: Claude (chat, via cloned repo) · Branch
 |---|---|---|---|
 | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
 | B1 | Foundation: auth, roles, workspaces, limits | Done | 11 / 11 |
-| B2 | Agent engine (post flow) | Not started | 0 / 13 |
+| B2 | Agent engine (post flow) | In progress | 1 / 13 |
 | B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 18 |
 | B4 | Video flow | Not started | 0 / 10 |
 | B5 | Remaining backend (library, admin, more platforms) | Not started | 0 / 13 |
@@ -43,6 +43,7 @@ Milestones:
 
 ## 5. Recently completed (newest first, keep last ~10)
 
+- 2026-11-17 — B2-01 completed: LLM wrapper (`backend/app/agents/llm.py`). `get_chat_model(kind)` (provider and model names from settings; `fast` falls back to the text model), `generate_structured(schema, messages)` (Pydantic output, one repair retry, `LLMOutputError` after that), `capture_usage()` usage/cost/latency recorder, provider registry (`register_provider`) and a scripted `fake` provider (`FakeScript`: `queue`, `fail_next(n)`, `set_default`, `calls`). New shared fixture `fake_llm` in `tests/conftest.py`. +60 tests (335 passed, 101 skipped because Postgres/Redis are not reachable in the sandbox), `llm.py` 100% covered, 11 deliberate breakages of the code were each caught by the tests. No new dependency, no migration.
 - 2026-11-15 — B1-11 completed: JSON access logs with request id (phase B1 done). New pure-ASGI `AccessLogMiddleware` writes one JSON line per request (logger `app.access`: `request_id`, `method`, `path`, `route`, `status_code`, `duration_ms`, `client_ip`; ERROR for 5xx/unhandled, WARNING if the client disconnects). Order is RequestID -> AccessLog -> CORS so preflights are logged. Uvicorn's access log is disabled (`--no-access-log` in compose and in `setup_logging`) and its startup lines now go through the JSON formatter. Fixed `alembic/env.py`, whose `fileConfig()` disabled every existing logger (the access log included) when migrations ran in-process. +30 tests (376 passed, 0 skipped), including a test that starts a real Uvicorn process and checks every output line is JSON.
 - 2026-11-14 — B1-10 completed: B1 test sweep and OpenAPI check. `/docs` now lists each of the 15 operations once under `/api/v1` with tags, summaries, request/response examples and documented errors in the real `{"error": {...}}` envelope (`schemas/errors.py`, `api/docs.py::errors`); root aliases hidden from the schema. Coverage sweep added 138 tests (suite 208 -> 346 passed, 0 skipped with Postgres and Redis): OpenAPI contract tests, JWT edge cases, reset rate-limiter failing closed, HTTP end-to-end password reset, deleted/inactive user paths, rename race. Auth/workspaces/limits/audit modules are at 98-100% line coverage. Makefile made portable (`BOOTSTRAP_PYTHON`), verified from a clean clone: README steps, `make test`, `make lint`, `make migrate`, `make seed`, and a live server smoke test.
 - 2026-11-14 — B1-09 completed: Limits and audit helper. `services/usage.py` (`get_effective_limits`: `user_limits` override, else `system_settings` default, else code fallback 3/5/100; `count_workspaces`; `ensure_can_create_workspace`), `services/audit.py::log` (adds an `audit_logs` row without committing; redacts sensitive `meta` keys). `WorkspaceService.create` locks the owner row and enforces `max_workspaces` (creating workspace number limit+1 gives 403 `workspace_limit_reached` with `details {limit, current}`); `WorkspaceService.soft_delete` now takes the actor and logs `workspace.delete` in the same transaction; `get_workspace_for_user` logs `workspace.admin_access` when an admin reaches someone else's workspace. 39 new tests (24 unit, 15 integration incl. a two-thread race test); full suite 208 passed.
@@ -59,6 +60,7 @@ Milestones:
 *(Fill in as the project takes shape.)*
 - Python: 3.11+ · DB: PostgreSQL 16 · Queue: Redis + Celery/Beat · Agents: LangGraph.
 - Local run: `docker compose up` (after B1-02). Tests: `make test` (offline, fake LLM, mock publisher).
+- Sandbox note (Claude chat sessions): Python is 3.12 and there is no Docker/Postgres/Redis, so use `make test BOOTSTRAP_PYTHON=python3`; the 101 integration tests then skip.
 - Default dev env values: `LLM_PROVIDER=fake`, `PUBLISHER_MODE=mock`, fake image/video/TTS/search providers.
 - Linux/macOS/CI: `make` creates the venv with `python3.13` (override with `make test BOOTSTRAP_PYTHON=python3`); Windows uses `py -3.13`. Integration tests need Postgres on 15432 and Redis (`docker compose up -d postgres redis`), otherwise they skip.
 - Windows: GNU Make 4.4.1 installed via winget; `make` creates and uses the project-local `.venv` with Python 3.13. Docker Desktop with WSL2 is required from B1-02.
@@ -68,6 +70,12 @@ Milestones:
 
 | Date | ID | Decision | Why | Docs updated |
 |---|---|---|---|---|
+| 2026-11-17 | B2-01-1 | `llm.py` defines its own small `ChatModel` interface (`_generate()` + shared `invoke()`), not LangChain chat-model classes. No new runtime dependency, so the Dockerfile list is unchanged. | The fake provider and tests need no SDK; no Gemini/LangChain provider package is pinned in `pyproject.toml`; a LangChain-backed provider can still be adapted behind the interface. | ARCHITECTURE.md 6.6 |
+| 2026-11-17 | B2-01-2 | Only `fake` is registered. `LLM_PROVIDER=gemini` (or anything else) raises `LLMConfigError` (`llm_not_configured`, details list the available providers). No real provider was written. | Open question 1 (which provider first) is unanswered, nothing live can be tested offline, and B2-01's Done-when only needs the fake. Adding one is `register_provider(name, factory)` plus tests with a mocked transport. | ARCHITECTURE.md 6.6 |
+| 2026-11-17 | B2-01-3 | `.env.example` and ARCHITECTURE section 10 now default to `LLM_PROVIDER=fake` (was `gemini`). | A fresh `cp .env.example .env` selected a provider that does not exist yet and made every `get_chat_model()` call fail; AGENTS.md says development runs with the fake. Change it when a real provider lands. | ARCHITECTURE.md, .env.example |
+| 2026-11-17 | B2-01-4 | `generate_structured` repairs only bad output (invalid JSON or schema mismatch, 1 retry). Provider failures are not retried there and surface as `LLMProviderError(retriable=...)`. | Retry/escalation and step logging belong to `make_checked_node` (B2-04); two retry loops would multiply calls and cost. | ARCHITECTURE.md 6.6, AGENT_SPECS.md 1.1 |
+| 2026-11-17 | B2-01-5 | Prompts and model replies are never logged or put in error messages/details (`LLMOutputError.details` lists only schema name, attempt count and field-level problems without input values). Failed calls produce no usage record; repair calls count as separate calls. | AGENTS.md privacy rules; `agent_steps` must not hold full prompts. A test greps the logs for the prompt and reply text. | ARCHITECTURE.md 6.6 |
+| 2026-11-17 | B2-01-6 | Tests that reach `get_chat_model()` use the `fake_llm` fixture (`tests/conftest.py`): sets `LLM_PROVIDER=fake`, blanks the model names, clears the `get_settings` cache and resets the shared script. | A developer's `.env` can select another provider; environment variables win over `.env`. | ARCHITECTURE.md 6.6 |
 | 2026-11-15 | B1-11-1 | Access logging is a separate pure-ASGI `AccessLogMiddleware` (not an extension of the `BaseHTTPMiddleware`-based `RequestIDMiddleware`). Stack, outer to inner: RequestID -> AccessLog -> CORS. `duration_ms` runs until the app finishes sending the response. | Pure ASGI sees the real status, route template and failures without buffering responses; being inside RequestID it reads `request_id` from the logging context, and being outside CORS it also logs preflights (which now get an `X-Request-ID` header too). | ARCHITECTURE.md |
 | 2026-11-15 | B1-11-2 | `JSONFormatter` copies only an allow-list of `extra=` fields (`STRUCTURED_FIELDS`), it does not dump every extra. Existing `extra=` values elsewhere stay unlogged as before. | Several call sites pass `email`/`to` (`services/auth.py`, `providers/email.py`, `services/seed.py`); dumping all extras would have started writing personal data to the logs. | ARCHITECTURE.md, AGENTS.md |
 | 2026-11-15 | B1-11-3 | Every request is logged, health probes included (level INFO), and 4xx are INFO, not WARNING. Query string, headers and bodies are never logged; the path is capped at 2048 characters. | Matches the task ("one line per request"); 401/404 are routine client errors and would drown real warnings. | ARCHITECTURE.md, README.md |
@@ -103,6 +111,7 @@ Milestones:
 ## 8. Known issues, blockers, open questions
 
 **Known issues / tech debt:**
+- LLM layer (B2-01): model names come only from env settings (`LLM_MODEL_TEXT`/`LLM_MODEL_FAST`); the admin-editable `system_settings.model_text`/`model_fast` keys (DATABASE.md 4.17) are not read yet (the layer has no DB access on purpose). `cost_usd` is whatever the provider reports (fake: 0.0); there is no pricing table. `retry_model_upgrade` (AGENT_SPECS 1.4) is not implemented; it belongs to the checked node (B2-04) and needs the model choice per attempt.
 - Health probes are logged like any request (docker healthcheck every 10 s). If that becomes noisy in production, add an exclusion list for `/health` and `/health/ready` to `AccessLogMiddleware` (setting in `core/config.py`).
 - The access line has no `user_id` (authentication runs inside route dependencies, after the middleware starts). If needed later, have `get_current_user` store the id in `request.state` and read it when logging.
 - `extra=` values on existing log calls (user ids, workspace ids, rate-limit counters) are still not written to the logs because of the allow-list (B1-11-2). Add individual safe fields to `STRUCTURED_FIELDS` deliberately if they are wanted.
@@ -118,7 +127,7 @@ Milestones:
 **Blocked (`[!]` tasks):** *(none)*
 
 **Open questions for the human:**
-1. Which LLM, image, video and TTS providers should be used first (all behind interfaces; fake by default)?
+1. Which LLM, image, video and TTS providers should be used first (all behind interfaces; fake by default)? For the LLM this now blocks only the real provider (`gemini` raises `llm_not_configured` until one is registered); B2 can be finished with the fake.
 2. Which platform gets the first real publisher? (default plan: Facebook Pages, task B3-16.)
 3. Do the developer apps/accounts for Meta, Google and TikTok exist yet? (Needed only for live tests; not for B1–B3 offline work.)
 
@@ -134,6 +143,16 @@ Template — copy for each session:
 - Next: <the precise next action — also copied to section 1>
 - Watch out: <gotchas, flaky tests, decisions the next agent must know>
 ```
+
+### 2026-11-17 — Claude (chat, cloned the public repo) — B2-01
+- Did: LLM wrapper.
+  - `backend/app/agents/llm.py`: `ChatModel` interface, provider registry, `get_chat_model(kind)`, `generate_structured(schema, messages, kind=, temperature=, model=)`, `capture_usage()`/`UsageRecorder`, error classes (`LLMError`, `LLMConfigError`, `LLMProviderError`, `LLMOutputError`, `FakeScriptExhaustedError`), scripted `FakeChatModel`/`FakeScript`.
+  - `tests/conftest.py` (`fake_llm` fixture) and `tests/unit/test_llm.py` (60 tests: scripting, failures, model selection, JSON extraction, repair path, usage capture, no prompt/reply in logs or errors, thread safety).
+  - Docs: `TASKS.md` (B2-01 ticked), `ARCHITECTURE.md` (6.6 new, section 10 default), `AGENT_SPECS.md` 1.1, `.env.example` (`LLM_PROVIDER=fake`), this file.
+- State: `ruff check` clean; 335 passed, 101 skipped (no Postgres/Redis in the sandbox, same 101 as the baseline); `llm.py` 100% line coverage; 11 mutation checks all caught (one redundant code-fence branch the mutation showed to be dead was removed). Branch `main`; baseline before the change was 275 passed, 101 skipped. Docker not run.
+- Left undone: nothing for B2-01. No real provider (see Decisions B2-01-2).
+- Next: `B2-02` (migration for `workflow_runs` and `agent_steps`); see section 1.
+- Watch out: `git log` HEAD before this session was `B-11-fix-slow-start-test` (contains the B1-11 work; the PROGRESS text was right, only the commit message differs). New tests that call `get_chat_model()`/`generate_structured()` must take the `fake_llm` fixture. Nodes should pass `temperature` per AGENT_SPECS 1.4 and wrap each attempt in `with capture_usage() as usage:` to fill `agent_steps`. Do not put prompts or replies into logs, `input_summary` or errors.
 
 ### 2026-11-15 — Claude (chat, cloned the public repo) — B1-11
 - Did: JSON access logs with request id.

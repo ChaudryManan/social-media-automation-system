@@ -42,7 +42,7 @@ Goal: runnable backend with auth, roles, workspaces and limits.
 Goal: run the full post-generation graph from a CLI with a fake LLM, including retry and escalation.
 **Read `AGENT_SPECS.md` first** (sections 1–5): schemas, checks, feedback format and test fixtures for every B2 node are defined there.
 
-- [ ] **B2-01 LLM wrapper** — `agents/llm.py`: `get_chat_model(kind)`, `generate_structured(schema, messages)` (Pydantic output with one repair retry), usage/cost capture hook, `fake` provider (scripted responses, can be told to fail N times). Models come from settings, never hard-coded.
+- [x] **B2-01 LLM wrapper** — `agents/llm.py`: `get_chat_model(kind)`, `generate_structured(schema, messages)` (Pydantic output with one repair retry), usage/cost capture hook, `fake` provider (scripted responses, can be told to fail N times). Models come from settings, never hard-coded.
   **Done when:** tests prove fake provider scripting and structured-output parsing. **Dep:** B1-03.
 - [ ] **B2-02 Migration for runs and steps** — `workflow_runs`, `agent_steps` + models + service to record steps.
   **Done when:** inserting and querying a run with steps works. **Dep:** B1-04.
