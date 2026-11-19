@@ -7,8 +7,11 @@ import psycopg
 import pytest
 import sqlalchemy as sa
 from alembic import command
+from alembic.autogenerate import compare_metadata
 from alembic.config import Config
+from alembic.migration import MigrationContext
 from app.core.config import settings
+from app.core.db import Base
 
 EXPECTED_TABLES = {
     "users",
@@ -17,6 +20,8 @@ EXPECTED_TABLES = {
     "workspaces",
     "system_settings",
     "audit_logs",
+    "workflow_runs",
+    "agent_steps",
 }
 
 
@@ -113,6 +118,69 @@ def test_alembic_upgrade_and_downgrade() -> None:
     finally:
         test_engine.dispose()
         # Clean up database and leave clean database ready
+        with psycopg.connect(admin_conn_str, autocommit=True) as conn:
+            conn.execute("DROP DATABASE IF EXISTS sma_test WITH (FORCE)")
+            conn.execute("CREATE DATABASE sma_test OWNER sma")
+
+
+RUN_TABLES = {"workflow_runs", "agent_steps"}
+
+
+@pytest.mark.integration
+def test_migration_0002_downgrade_one_step_and_model_parity() -> None:
+    """0002 can be undone alone, redone, and matches the ORM models."""
+    test_db_url = _get_test_db_url()
+    admin_conn_str = _get_admin_conn_str(test_db_url)
+
+    if not _postgres_is_reachable(admin_conn_str):
+        pytest.skip(
+            f"PostgreSQL at {admin_conn_str} is not reachable; "
+            "skipping integration test."
+        )
+
+    with psycopg.connect(admin_conn_str, autocommit=True) as conn:
+        conn.execute("DROP DATABASE IF EXISTS sma_test WITH (FORCE)")
+        conn.execute("CREATE DATABASE sma_test OWNER sma")
+
+    test_engine = sa.create_engine(test_db_url, poolclass=sa.pool.NullPool)
+
+    try:
+        alembic_cfg = Config("alembic.ini")
+        alembic_cfg.set_main_option("sqlalchemy.url", test_db_url)
+
+        command.upgrade(alembic_cfg, "head")
+        with test_engine.connect() as connection:
+            assert RUN_TABLES.issubset(sa.inspect(connection).get_table_names())
+
+        # Undo only 0002: foundation tables stay, run tables go.
+        command.downgrade(alembic_cfg, "0001_initial_schema")
+        with test_engine.connect() as connection:
+            tables = set(sa.inspect(connection).get_table_names())
+            assert RUN_TABLES.isdisjoint(tables)
+            assert {"users", "workspaces", "audit_logs"}.issubset(tables)
+
+        # ... and redo it.
+        command.upgrade(alembic_cfg, "head")
+        with test_engine.connect() as connection:
+            assert RUN_TABLES.issubset(sa.inspect(connection).get_table_names())
+
+            # Autogenerate finds nothing to change for the two new tables.
+            context = MigrationContext.configure(
+                connection, opts={"compare_type": True}
+            )
+            diffs = compare_metadata(context, Base.metadata)
+            flat = [
+                d
+                for group in diffs
+                for d in (group if isinstance(group, list) else [group])
+            ]
+            # repr() holds the table name for table, index and column diffs alike
+            mentioning_runs = [
+                d for d in flat if any(name in repr(d) for name in RUN_TABLES)
+            ]
+            assert mentioning_runs == [], mentioning_runs
+    finally:
+        test_engine.dispose()
         with psycopg.connect(admin_conn_str, autocommit=True) as conn:
             conn.execute("DROP DATABASE IF EXISTS sma_test WITH (FORCE)")
             conn.execute("CREATE DATABASE sma_test OWNER sma")

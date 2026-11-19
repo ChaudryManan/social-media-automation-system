@@ -221,6 +221,11 @@ UNIQUE (request_id, platform, version).
 
 A new run row is created each time generation is (re)started (initial, regenerate, resolve-retry).
 
+Implementation notes (migration `0002`, B2-02):
+- `request_id` is a plain indexed UUID in `0002`: `content_requests` does not exist until B3, whose migration adds `fk_workflow_runs_request_id_content_requests` (`ON DELETE CASCADE`).
+- `status` is text + CHECK (`ck_workflow_runs_run_status`), default `running`. `started_at` is NOT NULL, default `now()` (the row is created when the run starts); `finished_at` stays NULL until `completed`, `failed` or `cancelled`. Terminal statuses are final; a restart creates a new run.
+- `summary` is written by `services/runs.py` when the run reaches a terminal status: `steps`, `verdicts` (count per verdict), `retries`, `escalations`, `tokens_in`, `tokens_out`, `cost_usd` (null if no step reported a cost), `latency_ms`.
+
 ### 4.11 `agent_steps`
 | Column | Type | Notes |
 |---|---|---|
@@ -238,6 +243,12 @@ A new run row is created each time generation is (re)started (initial, regenerat
 | latency_ms | int | |
 | model | text | |
 | created_at | timestamptz | |
+
+Implementation notes (migration `0002`, B2-02):
+- `verdict` is text + CHECK (`ck_agent_steps_step_verdict`); `attempt >= 1` is enforced by `ck_agent_steps_attempt_positive`.
+- `tokens_in`, `tokens_out`, `latency_ms` are NOT NULL, default 0 (rule-only checks use no model); `cost_usd` is NULL when the cost is unknown; `model` may hold several names joined by `, `.
+- `request_id` is always copied from the run by `services/runs.record_step`. Steps are ordered by `created_at`.
+- `input_summary`/`output_summary` are redacted (same sensitive-key list as `audit_logs.meta`) and trimmed (strings 500 chars, 20 items per list/dict, depth 5, 8000 chars total) by the service before insert. `feedback` is cut at 4000 chars.
 
 ### 4.12 `approvals`
 | Column | Type | Notes |
@@ -391,6 +402,6 @@ Written only through `services/audit.py::log` (B1-09), which adds the row to the
 | Phase | Migration content |
 |---|---|
 | B1 | `users`, `refresh_tokens`, `user_limits`, `workspaces`, `audit_logs`, `system_settings` |
-| B2 | `workflow_runs`, `agent_steps` |
+| B2 | `workflow_runs`, `agent_steps` (migration `0002`; the `request_id` FK to `content_requests` is added by the B3 migration) |
 | B3 | `social_accounts`, `content_requests`, `request_targets`, `content_items`, `media_assets`, `approvals`, `scheduled_jobs`, `post_metrics`, `comments`, `notifications` |
 | B5 | `moderation_rules` and any index additions found necessary |

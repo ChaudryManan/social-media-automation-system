@@ -51,6 +51,15 @@ def _clean(value: Any) -> Any:
     return value
 
 
+def redact_sensitive(value: Any) -> Any:
+    """Return a JSON-safe copy of ``value`` with sensitive keys redacted.
+
+    Public wrapper so other services (e.g. ``runs``) share one list of
+    sensitive key names instead of keeping their own.
+    """
+    return _clean(value)
+
+
 def log(
     db: Session,
     actor: User | None,

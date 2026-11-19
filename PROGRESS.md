@@ -7,10 +7,10 @@
 
 ## 1. NEXT ACTION (one precise step)
 
-> **Start task `B2-02` (migration for `workflow_runs` and `agent_steps`) in `TASKS.md`. `B2-01` is done.**
-> Add Alembic migration `0002` (never edit `0001`), SQLAlchemy models in `backend/app/models/` and a small service (e.g. `services/runs.py`) that creates a run and records one `agent_steps` row per attempt, exactly as in `DATABASE.md` 4.10 and 4.11 (text+CHECK enums `run_status`/`step_verdict`, UUID PKs, UTC timestamps, indexes from section 5, `agent_steps.run_id` FK `ON DELETE CASCADE`). Note `workflow_runs.request_id` references `content_requests`, which only arrives in B3: create `request_id` as a plain indexed UUID column now and add the FK in the B3 migration (record this in Decisions), or ask the human. The step recorder should accept the numbers that `llm.capture_usage()` already provides (`tokens_in`, `tokens_out`, `cost_usd`, `latency_ms`, `models`). Done when: inserting and querying a run with steps works (needs Postgres on 15432; start it with `docker compose up -d postgres redis`), migration upgrade/downgrade test passes. Do not start B2-03 in the same change.
+> **Start task `B2-03` (state and prompts) in `TASKS.md`. `B2-01` and `B2-02` are done.**
+> Create `backend/app/agents/state.py` with the types in `ARCHITECTURE.md` 6.2 (`WorkflowState` TypedDict and its sub-types; use the schemas in `AGENT_SPECS.md` sections 2-5, do not invent fields) and `backend/app/agents/prompts/` with one prompt file per agent (placeholders only, no secrets, written against the output schemas in `AGENT_SPECS.md`) plus a small loader. Done when: the state types import and a prompt loader test passes (missing file and missing placeholder fail with a clear error). No node logic yet (that is B2-04 onwards). Use `llm.Message`/`system_message`/`user_message` from `agents/llm.py` for the loader output if it helps. Do not start B2-04 in the same change.
 
-Last updated: 2026-11-17 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B2-01: LLM wrapper with scripted fake provider`
+Last updated: 2026-11-17 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B2-02: workflow_runs and agent_steps (migration 0002, models, runs service)`
 
 ## 2. How to resume (any agent)
 
@@ -25,7 +25,7 @@ Last updated: 2026-11-17 · Last agent: Claude (chat, via cloned repo) · Branch
 |---|---|---|---|
 | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
 | B1 | Foundation: auth, roles, workspaces, limits | Done | 11 / 11 |
-| B2 | Agent engine (post flow) | In progress | 1 / 13 |
+| B2 | Agent engine (post flow) | In progress | 2 / 13 |
 | B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 18 |
 | B4 | Video flow | Not started | 0 / 10 |
 | B5 | Remaining backend (library, admin, more platforms) | Not started | 0 / 13 |
@@ -43,6 +43,7 @@ Milestones:
 
 ## 5. Recently completed (newest first, keep last ~10)
 
+- 2026-11-17 — B2-02 completed: migration `0002_workflow_runs_agent_steps` (tables, CHECKs, indexes from DATABASE.md section 5), models `WorkflowRun`/`AgentStep` (`backend/app/models/runs.py`) and `backend/app/services/runs.py` (`start_run`, `record_step`, `set_run_status`, `summarize_run`, `get_run`, `latest_run`, `list_steps`, `trim_summary`). `audit.redact_sensitive` added as the shared redaction helper. +75 tests (511 passed, 0 skipped, with real PostgreSQL 16 and Redis); new modules 100% covered; 21 deliberate breakages of the service and 4 of the models were all caught.
 - 2026-11-17 — B2-01 completed: LLM wrapper (`backend/app/agents/llm.py`). `get_chat_model(kind)` (provider and model names from settings; `fast` falls back to the text model), `generate_structured(schema, messages)` (Pydantic output, one repair retry, `LLMOutputError` after that), `capture_usage()` usage/cost/latency recorder, provider registry (`register_provider`) and a scripted `fake` provider (`FakeScript`: `queue`, `fail_next(n)`, `set_default`, `calls`). New shared fixture `fake_llm` in `tests/conftest.py`. +60 tests (335 passed, 101 skipped because Postgres/Redis are not reachable in the sandbox), `llm.py` 100% covered, 11 deliberate breakages of the code were each caught by the tests. No new dependency, no migration.
 - 2026-11-15 — B1-11 completed: JSON access logs with request id (phase B1 done). New pure-ASGI `AccessLogMiddleware` writes one JSON line per request (logger `app.access`: `request_id`, `method`, `path`, `route`, `status_code`, `duration_ms`, `client_ip`; ERROR for 5xx/unhandled, WARNING if the client disconnects). Order is RequestID -> AccessLog -> CORS so preflights are logged. Uvicorn's access log is disabled (`--no-access-log` in compose and in `setup_logging`) and its startup lines now go through the JSON formatter. Fixed `alembic/env.py`, whose `fileConfig()` disabled every existing logger (the access log included) when migrations ran in-process. +30 tests (376 passed, 0 skipped), including a test that starts a real Uvicorn process and checks every output line is JSON.
 - 2026-11-14 — B1-10 completed: B1 test sweep and OpenAPI check. `/docs` now lists each of the 15 operations once under `/api/v1` with tags, summaries, request/response examples and documented errors in the real `{"error": {...}}` envelope (`schemas/errors.py`, `api/docs.py::errors`); root aliases hidden from the schema. Coverage sweep added 138 tests (suite 208 -> 346 passed, 0 skipped with Postgres and Redis): OpenAPI contract tests, JWT edge cases, reset rate-limiter failing closed, HTTP end-to-end password reset, deleted/inactive user paths, rename race. Auth/workspaces/limits/audit modules are at 98-100% line coverage. Makefile made portable (`BOOTSTRAP_PYTHON`), verified from a clean clone: README steps, `make test`, `make lint`, `make migrate`, `make seed`, and a live server smoke test.
@@ -60,7 +61,7 @@ Milestones:
 *(Fill in as the project takes shape.)*
 - Python: 3.11+ · DB: PostgreSQL 16 · Queue: Redis + Celery/Beat · Agents: LangGraph.
 - Local run: `docker compose up` (after B1-02). Tests: `make test` (offline, fake LLM, mock publisher).
-- Sandbox note (Claude chat sessions): Python is 3.12 and there is no Docker/Postgres/Redis, so use `make test BOOTSTRAP_PYTHON=python3`; the 101 integration tests then skip.
+- Sandbox note (Claude chat sessions): Python is 3.12 (use `make test BOOTSTRAP_PYTHON=python3`) and there is no Docker, but the sandbox is root and can reach Ubuntu mirrors, so a real database can be started for DB tasks: `apt-get update && apt-get install -y postgresql redis-server`, set `port = 15432` in `/etc/postgresql/16/main/postgresql.conf`, `pg_ctlcluster 16 main start`, then as user `postgres` create role `sma` (password `sma`, superuser) and databases `sma` and `sma_test`, and run `redis-server --daemonize yes`. Without this the integration tests skip.
 - Default dev env values: `LLM_PROVIDER=fake`, `PUBLISHER_MODE=mock`, fake image/video/TTS/search providers.
 - Linux/macOS/CI: `make` creates the venv with `python3.13` (override with `make test BOOTSTRAP_PYTHON=python3`); Windows uses `py -3.13`. Integration tests need Postgres on 15432 and Redis (`docker compose up -d postgres redis`), otherwise they skip.
 - Windows: GNU Make 4.4.1 installed via winget; `make` creates and uses the project-local `.venv` with Python 3.13. Docker Desktop with WSL2 is required from B1-02.
@@ -70,6 +71,10 @@ Milestones:
 
 | Date | ID | Decision | Why | Docs updated |
 |---|---|---|---|---|
+| 2026-11-17 | B2-02-1 | `workflow_runs.request_id` is a plain indexed UUID without a foreign key; the B3 migration that creates `content_requests` must add `fk_workflow_runs_request_id_content_requests` (`ON DELETE CASCADE`). | DATABASE.md 4.10 specifies the FK, but the referenced table does not exist until B3 (DATABASE.md section 9 puts it there). | DATABASE.md 4.10, section 9 |
+| 2026-11-17 | B2-02-2 | Where DATABASE.md was silent: `started_at` NOT NULL default now; `tokens_in`/`tokens_out`/`latency_ms` NOT NULL default 0; `cost_usd` and `model` nullable (null = unknown); `attempt >= 1` CHECK; enums as text + named CHECK, like `users.role`. | A run starts when its row is created; rule-only checks use no model; unknown cost must not look like zero. | DATABASE.md 4.10, 4.11 |
+| 2026-11-17 | B2-02-3 | `services/runs.py` flushes but never commits, and takes plain numbers instead of importing `app.agents` types. Summaries are redacted with the shared `audit.redact_sensitive` and trimmed (500-char strings, 20 items, depth 5, 8000 chars) before storage; terminal run statuses are final; steps are accepted only for `running`/`paused` runs. | Same transaction rule as `audit.log`; layering (`agents -> services`, never the reverse); AGENTS.md privacy rules; DATABASE.md "keep full prompts out of the DB". | ARCHITECTURE.md 6.7, DATABASE.md 4.10, 4.11 |
+| 2026-11-17 | B2-02-4 | New fixtures `migrated_engine` and `pg` in `tests/integration/conftest.py` build `sma_test` with the real Alembic migrations (skips when PostgreSQL is unreachable). A migration test compares the migrated schema with the models for the run tables. | Tests on `create_all` cannot catch a wrong migration. | none |
 | 2026-11-17 | B2-01-1 | `llm.py` defines its own small `ChatModel` interface (`_generate()` + shared `invoke()`), not LangChain chat-model classes. No new runtime dependency, so the Dockerfile list is unchanged. | The fake provider and tests need no SDK; no Gemini/LangChain provider package is pinned in `pyproject.toml`; a LangChain-backed provider can still be adapted behind the interface. | ARCHITECTURE.md 6.6 |
 | 2026-11-17 | B2-01-2 | Only `fake` is registered. `LLM_PROVIDER=gemini` (or anything else) raises `LLMConfigError` (`llm_not_configured`, details list the available providers). No real provider was written. | Open question 1 (which provider first) is unanswered, nothing live can be tested offline, and B2-01's Done-when only needs the fake. Adding one is `register_provider(name, factory)` plus tests with a mocked transport. | ARCHITECTURE.md 6.6 |
 | 2026-11-17 | B2-01-3 | `.env.example` and ARCHITECTURE section 10 now default to `LLM_PROVIDER=fake` (was `gemini`). | A fresh `cp .env.example .env` selected a provider that does not exist yet and made every `get_chat_model()` call fail; AGENTS.md says development runs with the fake. Change it when a real provider lands. | ARCHITECTURE.md, .env.example |
@@ -111,6 +116,8 @@ Milestones:
 ## 8. Known issues, blockers, open questions
 
 **Known issues / tech debt:**
+- `alembic` autogenerate still reports `users.role` and `refresh_tokens.purpose` as changed (migration `0001` created `VARCHAR(50)`, the models' `Enum` is shorter). Harmless today; fix with a small migration when convenient. The run tables have no such drift (a test checks it).
+- Run/step recording (B2-02): steps are ordered by `created_at` only (no sequence column); two steps inserted within the same microsecond would have undefined order. The checked node (B2-04) should not rely on a finer order. `summary` is written only when a run reaches a terminal status.
 - LLM layer (B2-01): model names come only from env settings (`LLM_MODEL_TEXT`/`LLM_MODEL_FAST`); the admin-editable `system_settings.model_text`/`model_fast` keys (DATABASE.md 4.17) are not read yet (the layer has no DB access on purpose). `cost_usd` is whatever the provider reports (fake: 0.0); there is no pricing table. `retry_model_upgrade` (AGENT_SPECS 1.4) is not implemented; it belongs to the checked node (B2-04) and needs the model choice per attempt.
 - Health probes are logged like any request (docker healthcheck every 10 s). If that becomes noisy in production, add an exclusion list for `/health` and `/health/ready` to `AccessLogMiddleware` (setting in `core/config.py`).
 - The access line has no `user_id` (authentication runs inside route dependencies, after the middleware starts). If needed later, have `get_current_user` store the id in `request.state` and read it when logging.
@@ -143,6 +150,18 @@ Template — copy for each session:
 - Next: <the precise next action — also copied to section 1>
 - Watch out: <gotchas, flaky tests, decisions the next agent must know>
 ```
+
+### 2026-11-17 — Claude (chat, cloned the public repo) — B2-02
+- Did: `workflow_runs` and `agent_steps`.
+  - Migration `backend/alembic/versions/0002_workflow_runs_agent_steps.py` (down revision `0001_initial_schema`, upgrade and downgrade tested; `0001` untouched).
+  - `backend/app/models/runs.py` (`WorkflowRun`, `AgentStep`), exported from `app.models`.
+  - `backend/app/services/runs.py`; `audit.redact_sensitive` (public wrapper of the existing redaction).
+  - Tests: `tests/unit/test_runs_service.py` (SQLite), `tests/integration/test_runs_db.py` (PostgreSQL via migrations), `tests/integration/conftest.py` (`migrated_engine`, `pg`), `tests/integration/test_migrations.py` extended (new tables, one-step downgrade, model/migration parity).
+  - Docs: `TASKS.md` ticked, `DATABASE.md` 4.10/4.11/section 9 notes, `ARCHITECTURE.md` 6.7, this file.
+- State: `ruff check` clean; 511 passed, 0 skipped (real PostgreSQL 16 on 15432 and Redis installed in the sandbox; baseline before the change: 436 passed). New modules 100% line coverage. 21 mutations of the service, 4 of the models: all caught (one gap, unrounded cost on the returned object, closed with an extra assertion). Docker not run. `alembic upgrade head`, one-step downgrade and re-upgrade verified on PostgreSQL.
+- Left undone: nothing for B2-02. The `request_id` foreign key is deliberately deferred to B3 (Decisions B2-02-1).
+- Next: `B2-03` (state and prompts); see section 1.
+- Watch out: B2-04 should call `record_step` once per attempt and commit itself (the service only flushes), pass `model=", ".join(usage.models)` and the numbers from `capture_usage()`, and call `set_run_status` for pause/resume/finish. A step can no longer be added after the run is `completed`/`failed`/`cancelled`. Keep summaries small: they are cut at 500 chars per string. The B3 migration must add the `request_id` FK (see Decisions). New integration tests that need the real schema should use the `pg` fixture instead of `create_all`.
 
 ### 2026-11-17 — Claude (chat, cloned the public repo) — B2-01
 - Did: LLM wrapper.

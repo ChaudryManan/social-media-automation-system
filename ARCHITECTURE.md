@@ -265,6 +265,14 @@ Agents never import a model SDK; they call this module only.
 - `fake` provider: `get_fake_script()` returns the shared `FakeScript` (`queue(...)`, `fail_next(n)`, `set_default(...)`, `calls`, `reset()`). An unscripted call raises `fake_llm_script_exhausted` so tests cannot pass by accident. Tests use the `fake_llm` fixture in `tests/conftest.py`, which forces `LLM_PROVIDER=fake` regardless of `.env`.
 - Prompts and model replies are never logged and never appear in error messages or details; the log line carries provider, model, kind, token counts and latency only.
 
+### 6.7 Run and step recording (`app/services/runs.py`, B2-02)
+
+- `start_run(db, request_id)` creates a `workflow_runs` row (status `running`, `thread_id` = request id by default). Every (re)start of generation makes a new run.
+- `record_step(db, run, node_name, attempt, verdict, ...)` adds one `agent_steps` row per node attempt. It takes plain numbers (`tokens_in`, `tokens_out`, `cost_usd`, `latency_ms`, `model`) so services never import `app.agents`; the checked node copies them from `llm.capture_usage()`. Summaries are redacted and trimmed before storage; steps can only be added while the run is `running` or `paused`.
+- `set_run_status(db, run, status)` is the only way a run changes status: `running` and `paused` alternate; `completed`, `failed`, `cancelled` are final, stamp `finished_at` and store `summarize_run()` in `summary`. Changing a finished run raises `ConflictError` (`run_finished`).
+- Readers: `get_run` (`run_not_found`), `latest_run(request_id)`, `list_steps(run_id)`.
+- Like `audit.log`, these functions flush but do not commit; the caller owns the transaction.
+
 ## 7. Interfaces (extension points)
 
 ```python

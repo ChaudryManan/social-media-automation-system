@@ -44,7 +44,7 @@ Goal: run the full post-generation graph from a CLI with a fake LLM, including r
 
 - [x] **B2-01 LLM wrapper** — `agents/llm.py`: `get_chat_model(kind)`, `generate_structured(schema, messages)` (Pydantic output with one repair retry), usage/cost capture hook, `fake` provider (scripted responses, can be told to fail N times). Models come from settings, never hard-coded.
   **Done when:** tests prove fake provider scripting and structured-output parsing. **Dep:** B1-03.
-- [ ] **B2-02 Migration for runs and steps** — `workflow_runs`, `agent_steps` + models + service to record steps.
+- [x] **B2-02 Migration for runs and steps** — `workflow_runs`, `agent_steps` + models + service to record steps.
   **Done when:** inserting and querying a run with steps works. **Dep:** B1-04.
 - [ ] **B2-03 State and prompts** — `agents/state.py` per `ARCHITECTURE.md` 6.2; `agents/prompts/` with one prompt file per agent (placeholders, no secrets).
   **Done when:** state types import and a prompt loader test passes. **Dep:** B2-01.
