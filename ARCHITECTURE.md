@@ -14,7 +14,7 @@
 | ORM / migrations | SQLAlchemy 2.0 + Alembic | Sync or async consistently (default: **sync** SQLAlchemy for simplicity with Celery). |
 | Database | PostgreSQL 16 | JSONB for flexible agent output. |
 | Queue / scheduler | Redis + Celery + Celery Beat | Beat polls the `scheduled_jobs` table. |
-| Agents | LangGraph (+ LangChain model wrappers) | Postgres checkpointer for resumable runs. |
+| Agents | LangGraph (+ LangChain model wrappers) | Postgres checkpointer for resumable runs. `langgraph`, `langgraph-checkpoint` and `langgraph-prebuilt` are pinned together in `pyproject.toml`: an unpinned `langgraph-checkpoint` resolves to a version that cannot import with the pinned `langchain-core`. Change them as a set. |
 | LLM | Provider-agnostic wrapper, default Gemini | Config-driven model names; `fake` provider for tests. |
 | Media | Provider interfaces (image, video-scene, TTS) + FFmpeg | Providers are config, not hard-coded. |
 | Storage | Local filesystem (dev) / S3-compatible (prod) | Behind `StorageBackend` interface. |
@@ -272,6 +272,14 @@ Agents never import a model SDK; they call this module only.
 - `set_run_status(db, run, status)` is the only way a run changes status: `running` and `paused` alternate; `completed`, `failed`, `cancelled` are final, stamp `finished_at` and store `summarize_run()` in `summary`. Changing a finished run raises `ConflictError` (`run_finished`).
 - Readers: `get_run` (`run_not_found`), `latest_run(request_id)`, `list_steps(run_id)`.
 - Like `audit.log`, these functions flush but do not commit; the caller owns the transaction.
+
+### 6.8 Prompts (`app/agents/prompts/`, B2-03)
+
+- One Markdown file per prompt: `planner`, `researcher_queries`, `researcher_summary`, `strategist`, `writer`, `image`, `hashtag`, `reviewer` and the shared `judge` (video prompts come with B4). Format and rules: `AGENT_SPECS.md` 1.3.
+- `load_prompt(name)` validates the file (front matter with `prompt_version`, sections in order, well-formed `{{variables}}`) and returns a `PromptTemplate`. `template.messages(feedback=None, **variables)` returns the system message (Role, Output format, Rules, Examples) and the user message (Task, Inputs, `# Previous attempt feedback` block on retries). `template.version` goes to `agent_steps.output_summary.prompt_version`.
+- Rendering is strict (missing or unknown variables raise `PromptError`) and single-pass, so user text can never be expanded as a template. User-influenced text stays in the user message.
+- `{{safety_rules}}` is built in (`prompts/fragments/safety_rules.md`, AGENT_SPECS 1.7).
+- Prompt files are declared as package data in `pyproject.toml`; a test checks that every file is covered.
 
 ## 7. Interfaces (extension points)
 

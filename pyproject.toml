@@ -17,6 +17,8 @@ dependencies = [
     "httpx==0.28.1",
     "langchain-core==0.3.61",
     "langgraph==0.4.7",
+    "langgraph-checkpoint==2.0.26",
+    "langgraph-prebuilt==0.2.3",
     "psycopg[binary]==3.2.9",
     "pydantic==2.11.4",
     "pydantic-settings==2.9.1",
@@ -35,6 +37,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["backend"]
+
+[tool.setuptools.package-data]
+"app.agents.prompts" = ["*.md", "fragments/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -20,10 +20,12 @@
 - Never mix languages unless the brand voice asks for it.
 
 ### 1.3 Prompts
-- One file per agent in `app/agents/prompts/<agent>.md` with sections: `# Role`, `# Task`, `# Inputs`, `# Output format`, `# Rules`, `# Examples` (optional).
-- Variables use `{{name}}`. Prompts contain no secrets and no hard-coded model names.
-- Each prompt file has a `prompt_version` (e.g. `writer.v1`) stored in `agent_steps.output_summary.prompt_version`.
-- Retry prompts append a `# Previous attempt feedback` block (see 1.5).
+- One file per prompt in `app/agents/prompts/<name>.md` (`planner`, `researcher_queries`, `researcher_summary`, `strategist`, `writer`, `image`, `hashtag`, `reviewer`, and the shared `judge`; video prompts arrive with B4). Sections in this order: `# Role`, `# Task`, `# Inputs`, `# Output format`, `# Rules`, `# Examples` (optional). The file starts with a front matter block holding `prompt_version`.
+- Variables use `{{name}}` (lower-case). `{{safety_rules}}` is built in and filled from `prompts/fragments/safety_rules.md` (rules in 1.7), so it exists in one place. Prompts contain no secrets and no hard-coded model names.
+- Each prompt file has a `prompt_version` (e.g. `writer.v1`, must match the file name) stored in `agent_steps.output_summary.prompt_version`. Bump it when the prompt text changes in a way that can change behaviour.
+- Use `load_prompt(name)` and `template.messages(feedback=..., **variables)` (system = Role, Output format, Rules, Examples; user = Task, Inputs and the feedback block). Rendering is strict: a missing or unknown variable is an error, and values (including user text) are inserted in one pass and never expanded again. Structured values are rendered as JSON; `None` or empty text becomes `none`.
+- Retry prompts append a `# Previous attempt feedback` block (see 1.5); the loader does this when `feedback=` is given.
+- The judge prompt is shared: the node passes the agent name and the rubric for that agent (rubrics below) as variables.
 
 ### 1.4 Generation settings (defaults, override in settings)
 | Agent | Temperature | Notes |
@@ -118,7 +120,11 @@ class ContentPlan(BaseModel):
 
 ### 3.3 `researcher`
 - **Input:** plan, topic, language.
-- **Process:** LLM proposes up to **5 search queries** → `SearchProvider.search()` → LLM summarizes results into notes. If no results or provider fails: continue with `grounded=false`.
+- **Process:** LLM proposes up to **5 search queries** → `SearchProvider.search()` → LLM summarizes results into notes. If no results or provider fails: continue with `grounded=false`. Two prompts: `researcher_queries` (output `SearchQueries`) and `researcher_summary` (output `ResearchNotes`).
+```python
+class SearchQueries(BaseModel):
+    queries: list[str]             # at most 5 (setting), most useful first
+```
 - **Output:**
 ```python
 class Fact(BaseModel):
