@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     VIDEO_PROVIDER: str = "fake"
     TTS_PROVIDER: str = "fake"
     SEARCH_PROVIDER: str = "fake"
+    TAVILY_API_KEY: str | None = None
 
     # Storage
     STORAGE_BACKEND: str = "local"

@@ -52,7 +52,7 @@ Goal: run the full post-generation graph from a CLI with a fake LLM, including r
   **Done when:** tests: pass first time; fail twice then pass; exhausts retries and escalates; resume with `retry` resets the counter. **Dep:** B2-02, B2-03. Refs: FR-6.1–6.3.
 - [x] **B2-05 validate_input and planner nodes** — moderation hook (stub reading rules, real table arrives in B5), plan schema.
   **Done when:** node tests with fake LLM; invalid input ends the graph with `errors`. **Dep:** B2-03.
-- [ ] **B2-06 researcher node** — `providers/search.py` interface + `FakeSearch` + one real implementation selectable by config; summarize results into `research`.
+- [x] **B2-06 researcher node** — `providers/search.py` interface + `FakeSearch` + one real implementation selectable by config; summarize results into `research`.
   **Done when:** works with fake search; real provider behind `SEARCH_PROVIDER` documented in `.env.example`. **Dep:** B2-03.
 - [ ] **B2-07 strategist node** — per-platform strategy from plan + research + workspace brand voice.
   **Done when:** strategy keyed by each target platform; brand voice appears in the prompt input (test). **Dep:** B2-05, B2-06. Refs: FR-5.1.

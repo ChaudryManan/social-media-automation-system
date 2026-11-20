@@ -372,7 +372,8 @@ LLM_MODEL_FAST=
 IMAGE_PROVIDER=fake                # fake | <real provider>
 VIDEO_PROVIDER=fake
 TTS_PROVIDER=fake
-SEARCH_PROVIDER=fake
+SEARCH_PROVIDER=fake               # fake (offline, default) | tavily
+TAVILY_API_KEY=                    # only needed when SEARCH_PROVIDER=tavily
 
 STORAGE_BACKEND=local              # local | s3
 STORAGE_PATH=./storage
@@ -432,3 +433,13 @@ Add new decisions here (D9, D10, ...) and mirror them in `PROGRESS.md` Decisions
 - `validate_input` (`nodes/validate_input.py`) uses no LLM and no database. `make_validate_input_node(banned_words=, platform_rules=, check_accounts=, check_quota=)` returns the node; each hook is a plain callable evaluated on every run. Defaults: `no_banned_words` (stub until `moderation_rules` exists, B5-08) and `platform_rules.default_platform_rules` (the code defaults of AGENT_SPECS section 2). `check_accounts(state)` (account active, right workspace, can post this type) and `check_quota(state)` need B3 tables and run only if the request is well formed. All problems are collected; with any, the node returns `{"status": "failed", "errors": [...]}` and `route_after_validation` returns `"failed"` (the graph ends), otherwise `{"status": "generating"}` and `"ok"`. Error messages are for the submitter and never name the banned word that matched.
 - `agents/platform_rules.py` holds the default per-platform rules and `platform_supports(rules, platform, content_type)`: an explicit `allowed_formats` list wins, otherwise `image_aspect` means `post` and `video_aspect` means `video`.
 - `planner` (`nodes/planner.py`): `make_planner_node(max_retries=, judge_threshold=, use_judge=, platform_rules=)` returns a `CheckedNode` (section 6.3) with step key `planner`. The agent renders prompt `planner` and stores `ContentPlan.model_dump()` in `state["plan"]`; rule checks: 2 to 5 non-empty key messages, angle and audience filled, plan language equal to the requested one (case-insensitive, `_` equals `-`); the judge (prompt `judge`, `kind="fast"`, rubric in code) sees the plan and the rules of the target platforms only. `ContentPlan` enforces only the shape (`goal` values), so rule failures get retry feedback instead of a silent schema repair.
+
+### 6.10 Search provider and `researcher` (`app/providers/search.py`, `app/agents/nodes/researcher.py`, B2-06)
+
+- `SearchProvider.search(query) -> list[SearchResult]` (`title`, `url`, `snippet`, snippet trimmed to 1000 characters). `get_search_provider(max_results=5)` picks the provider from `SEARCH_PROVIDER` on every call: `fake` (default; the shared `FakeSearch`: deterministic results, `set_results`, `queue`, `fail_next(n, retriable=)`, `calls`, `reset()`) or `tavily` (`TavilySearch`: `POST https://api.tavily.com/search`, Bearer `TAVILY_API_KEY`, over `httpx`, no new dependency). Anything else raises `SearchConfigError`.
+- Errors derive from `AppError` and carry `retriable`: `SearchProviderError` (`search_provider_error`: network, HTTP 429/5xx retriable, other 4xx and unreadable replies not) and `SearchConfigError` (`search_not_configured`: unknown provider, missing or rejected key; never retriable, so a checked node escalates at once). Queries and result text are never logged; error messages never carry the key or the query.
+- `researcher` (`make_researcher_node(max_retries=, judge_threshold=, use_judge=, max_queries=5, search_provider=)` returns a `CheckedNode`, step key `researcher`): `researcher_queries` proposes up to `max_queries` queries (trimmed, de-duplicated, capped in code), every query is searched, results are merged by URL, and `researcher_summary` turns them into `ResearchNotes` stored in `state["research"]`. Both LLM calls use temperature 0.2.
+- Fallback: no results, or every search failed (`SearchProviderError`) -> `grounded=false`, `facts=[]`, one caution to avoid specific statistics, and **no summary or judge call**. A failed query does not hide the others. A `SearchConfigError` is not swallowed.
+- Rule checks: at most 15 facts; every `high`/`medium` fact has a `source_url`; no duplicate claims (case and spacing ignored); no empty claims; `source_url` is an http(s) link; `grounded=false` needs a caution. The judge (`kind="fast"`, rubric `RESEARCH_RUBRIC`) is skipped when `grounded` is false.
+- A retry runs the whole agent again (queries and searches included); the checker feedback is added to the summary prompt only.
+

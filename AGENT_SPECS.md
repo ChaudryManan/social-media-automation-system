@@ -142,6 +142,7 @@ class ResearchNotes(BaseModel):
     grounded: bool                 # False if no usable sources
 ```
 - **Rules:** never output a specific number/date/quote without a source; when `grounded=false` set `cautions` to say "avoid specific statistics".
+- **Implementation notes (B2-06):** the node, not the LLM, builds the `grounded=false` notes when there are no results (no summary call). The rule checks also reject empty claims and `source_url` values that are not http(s) links, and require a caution when `grounded=false`. See `ARCHITECTURE.md` 6.10.
 - **Rule checks:** every `high/medium` fact has a `source_url`; at most 15 facts; no duplicate claims.
 - **Judge rubric:** relevance, source quality, no hallucinated specifics. (Skip judge when `grounded=false`.)
 

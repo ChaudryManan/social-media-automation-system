@@ -7,10 +7,10 @@
 
 ## 1. NEXT ACTION (one precise step)
 
-> **Start task `B2-06` (researcher node) in `TASKS.md`. `B2-01` to `B2-05` are done.**
-> Create `backend/app/providers/search.py` (a `SearchProvider` interface with `search(query) -> list[result]`, a `FakeSearch`, and one real implementation chosen by `SEARCH_PROVIDER`; document it in `.env.example`) and the `researcher` node (`AGENT_SPECS.md` 3.3): the LLM proposes up to 5 queries (`SearchQueries`, prompt `researcher_queries`), the provider searches, the LLM summarises into `ResearchNotes` (prompt `researcher_summary`) and the node stores `state["research"]`; if there are no results or the provider fails, continue with `grounded=false`. Define `ResearchNotes`/`Fact` as in AGENT_SPECS 3.3, wrap the step with `agents/checked.py` (see `nodes/planner.py` for the pattern: `make_*_node` returning a `CheckedNode`), pass settings as plain numbers, add a test that each prompt's example fields equal its Pydantic model, and use `fake_llm` plus `FakeSearch`. If a new runtime dependency is needed, add it to `pyproject.toml` and the Dockerfile. Do not start B2-07 in the same change.
+> **Start task `B2-07` (strategist node) in `TASKS.md`. `B2-01` to `B2-06` are done.**
+> Create `backend/app/agents/nodes/strategist.py` per `AGENT_SPECS.md` 3.4: per-platform strategy (keyed by each distinct target platform) from `state["plan"]`, `state["research"]`, the workspace `brand_voice` and the platform rules (`agents/platform_rules.py`), prompt `strategist` (temperature 0.5). Define the output model as in AGENT_SPECS 3.4, store it in `state["strategy"]` (a dict keyed by platform), wrap the step with `agents/checked.py` (copy the pattern of `nodes/researcher.py` or `nodes/planner.py`: agent function + `check_*` + `make_*_judge` + `make_strategist_node` returning a `CheckedNode`), pass settings as plain numbers, add a test that the prompt's example fields equal the Pydantic model, and a test that the brand voice appears in the prompt input (TASKS "Done when"). Use `fake_llm` only. Do not start B2-08 in the same change.
 
-Last updated: 2026-11-20 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B2-05: validate_input and planner nodes`
+Last updated: 2026-11-20 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B2-06: researcher node and search provider`
 
 ## 2. How to resume (any agent)
 
@@ -25,7 +25,7 @@ Last updated: 2026-11-20 · Last agent: Claude (chat, via cloned repo) · Branch
 |---|---|---|---|
 | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
 | B1 | Foundation: auth, roles, workspaces, limits | Done | 11 / 11 |
-| B2 | Agent engine (post flow) | In progress | 5 / 13 |
+| B2 | Agent engine (post flow) | In progress | 6 / 13 |
 | B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 18 |
 | B4 | Video flow | Not started | 0 / 10 |
 | B5 | Remaining backend (library, admin, more platforms) | Not started | 0 / 13 |
@@ -43,6 +43,7 @@ Milestones:
 
 ## 5. Recently completed (newest first, keep last ~10)
 
+- 2026-11-20 — B2-06 completed: `backend/app/providers/search.py` (`SearchProvider`, `SearchResult`, `FakeSearch`, `TavilySearch` over `httpx`, `get_search_provider`, `SearchError` family with `retriable`) and `backend/app/agents/nodes/researcher.py` (`SearchQueries`, `Fact`, `ResearchNotes`, `make_research_agent`, `check_research`, `make_research_judge`, `make_researcher_node` returning a `CheckedNode`). New setting `TAVILY_API_KEY`. +88 tests (1172 passed, 0 skipped with real PostgreSQL 16 and Redis; baseline 1084); both new modules 100% line and branch covered. No new dependency, no migration.
 - 2026-11-20 — B2-05 completed: `backend/app/agents/nodes/validate_input.py` (no LLM; topic, content type, accounts, platform support, language, `publish_at`, options, banned words; injected hooks for moderation, platform rules, accounts, quota; `route_after_validation`), `backend/app/agents/nodes/planner.py` (`ContentPlan`, `plan_agent`, `check_plan`, `make_plan_judge`, `make_planner_node` returning a `CheckedNode`), `backend/app/agents/platform_rules.py` (AGENT_SPECS section 2 defaults, `platform_supports`). New `GraphState.options`. +230 tests (1084 passed, 0 skipped with real PostgreSQL 16); the new modules are 100% line and branch covered; 60 deliberate breakages, all caught after 1 test gap was closed and 2 redundant code paths removed.
 - 2026-11-20 — B2-04 completed: checked-node factory (`backend/app/agents/checked.py`): `make_checked_node` / `add_checked_node`, `CheckResult` / `Issue` (AGENT_SPECS 1.5), `AgentOutput`, `StepRecord`, `db_step_recorder`. Agent -> rule checks -> optional LLM judge (only if the rules pass, threshold 0.7) -> pass / retry with feedback / escalate through `interrupt()` (resume `{"action": "retry" | "abort"}`); one `agent_steps` row per attempt (tokens/cost/model summed over agent and judge). New `GraphState.attempt_info`. Dockerfile now pins the four langgraph packages. +96 tests (854 passed, 0 skipped with real PostgreSQL 16; 90 unit, 4 PostgreSQL integration, 2 for interrupt pass-through); `checked.py` 100% line and branch coverage; 42 deliberate breakages, all caught after 2 test gaps were closed.
 - 2026-11-17 — B2-03 completed: `backend/app/agents/state.py` (`GraphState`, `PlatformDraft`, `TargetAccount`, `Platform`, `ContentType` exactly as ARCHITECTURE 6.2) and `backend/app/agents/prompts/` (loader with validation, strict single-pass rendering, retry-feedback block, built-in `safety_rules` fragment; 9 prompts: planner, researcher_queries, researcher_summary, strategist, writer, image, hashtag, reviewer, judge). Found and fixed a broken dependency set: `langgraph==0.4.7` could not be imported on a fresh install because `langgraph-checkpoint` resolved to 4.3.2; now pinned (`langgraph-checkpoint==2.0.26`, `langgraph-prebuilt==0.2.3`). +247 tests (758 passed, 0 skipped with real PostgreSQL and Redis); new modules 100% covered; 27 deliberate breakages, all caught after 2 test gaps were closed.
@@ -74,6 +75,9 @@ Milestones:
 
 | Date | ID | Decision | Why | Docs updated |
 |---|---|---|---|---|
+| 2026-11-20 | B2-06-1 | First real search provider is **Tavily** (`SEARCH_PROVIDER=tavily`, new setting `TAVILY_API_KEY`, `.env.example` and ARCHITECTURE section 10 updated). It is called with `httpx` (already a dependency), `POST https://api.tavily.com/search`, `Authorization: Bearer <key>`, body `{query, max_results}`; the reply's `results[].title/url/content` are mapped to `SearchResult`. | It is built for LLM agents, returns clean snippets with URLs, needs no scraping, and has a free tier. Checked against the public Tavily docs on 2026-11-20. Closes the "first real search provider" pending decision; change it by adding a class behind the same interface. | ARCHITECTURE 6.10 and 10, `.env.example`, `core/config.py` |
+| 2026-11-20 | B2-06-2 | Search failures follow two paths: `SearchProviderError` (network, HTTP 429/5xx/other, unreadable reply) is skipped per query and, if nothing is found, the node continues with `grounded=false` (AGENT_SPECS 3.3); `SearchConfigError` (unknown provider, missing or rejected key) is non-retriable and escalates through the checked node. | A missing key is a deployment mistake that must not silently turn every post into an ungrounded one. | ARCHITECTURE 6.10 |
+| 2026-11-20 | B2-06-3 | When there are no results the node builds the `grounded=false` notes itself and makes no summary call and no judge call. Extra rule checks beyond AGENT_SPECS 3.3: no empty claims, `source_url` must be http(s), `grounded=false` needs a caution. `Fact.source_url/source_title` default to `None` and `trends/angles/cautions` to `[]`. | Saves two LLM calls on a known-empty input; the extra rules give precise retry feedback instead of a schema repair. | AGENT_SPECS 3.3, ARCHITECTURE 6.10 |
 | 2026-11-20 | B2-05-1 | `validate_input` is a plain function made by `make_validate_input_node` with injected hooks (`banned_words`, `platform_rules`, `check_accounts`, `check_quota`). Defaults: no banned words, code default rules, no account/quota check. It collects all problems and sets `status="failed"` plus `errors`. The account and quota hooks run only when the request is otherwise well formed. | The tables (`social_accounts`, `moderation_rules`, request counts) do not exist until B3/B5, and the node must stay testable offline. Hooks let those tasks plug in real data without changing the node. | ARCHITECTURE.md 6.9, AGENT_SPECS.md 3.1 |
 | 2026-11-20 | B2-05-2 | Added `GraphState.options: dict` (extra request options). | AGENT_SPECS lists `options` as an input of `validate_input` and `planner`, the planner prompt has an `options` variable, and `content_requests.options` exists (DATABASE 4.6), but ARCHITECTURE 6.2 had no state field for it. Options are user text: they are size-limited (2000 chars) and checked for banned words in `validate_input`. | ARCHITECTURE.md 6.2; `test_agent_state.py` |
 | 2026-11-20 | B2-05-3 | Content-type support per platform is read from the platform rules: an explicit `allowed_formats` list wins, else `image_aspect` means `post` and `video_aspect` means `video` (so TikTok and YouTube reject `post`). `agents/platform_rules.py` holds the AGENT_SPECS section 2 defaults, and a test pins them to the JSON in that document. | One place for platform capabilities; B2-06 onwards need the same rules. | ARCHITECTURE.md 6.9 |
@@ -129,11 +133,12 @@ Milestones:
 | 2026-11-13 | — | Stack: FastAPI, LangGraph, PostgreSQL, Redis + Celery; frontend (React/Next.js) only after Backend Core Complete | Project owner's choice | PRD, ARCHITECTURE |
 | 2026-11-13 | — | A workspace has exactly one owner (no team members in v1); one social account connected once per workspace | Keeps v1 scope small | PRD |
 
-*Pending decisions to make when reached:* enum strategy (PG enum vs text+CHECK) in B1-04; first real LLM/image/video/TTS/search providers; email provider.
+*Pending decisions to make when reached:* first real LLM/image/video/TTS providers (search: Tavily, B2-06-1); email provider.
 
 ## 8. Known issues, blockers, open questions
 
 **Known issues / tech debt:**
+- Researcher (B2-06): the judge sees the notes and the plan but **not** the raw search results (they are not in `GraphState`, and no state key may be invented), so it cannot verify that a `source_url` really came from a search; a rule check only requires an http(s) link. If hallucinated sources show up with a real model, add the retrieved URLs to the state (document it first) and check membership. A retry repeats the queries and the searches (no cache). The number of results per query (5) and `max_queries` (5) are code defaults, not yet read from `system_settings`. The ungrounded caution text is English whatever the request language. `TavilySearch` was tested with a mocked HTTP layer only (no live call, no `-m live` contract test yet). Prompt wording is untested against a real model.
 - **Platform rules mismatch (found in B2-05, needs a decision):** the seeded `system_settings.platform_rules` (`services/seed.py`, B1-06) has a different shape from AGENT_SPECS section 2 (`max_caption_length`, `max_hashtags`, `allowed_formats` instead of `caption_max`, `hashtags_min/max`, `image_aspect`, `video_aspect`) and says Facebook allows only `post` while AGENT_SPECS says Facebook also takes video. The code (checks) follows AGENT_SPECS; `platform_supports` still honours an explicit `allowed_formats`, so a database seeded with the old value would reject `video` for Facebook. Replace the seed value with the AGENT_SPECS section 2 JSON (and, for existing databases, update the setting) when the nodes start reading settings from the database (B3), and decide whether Facebook video is really wanted. Nothing reads the setting from the database yet: the nodes take a `platform_rules()` callable.
 - `validate_input` (B2-05): the optional LLM safety classifier is not implemented; `check_accounts`/`check_quota` are hooks that B3-05/B3-06 must fill in (accounts active and in the workspace, monthly quota); `no_banned_words` is a stub until B5-08. The node writes no `agent_steps` row (it is not an LLM agent). The banned-word list has no per-workspace scope (rules are global, DATABASE 4.18).
 - Planner (B2-05): the judge rubric text lives in `nodes/planner.py` (`PLANNER_RUBRIC`); prompt wording is untested against a real model. `platforms` and `options` in the prompt are rendered by the node, not by the loader.
@@ -175,6 +180,16 @@ Template — copy for each session:
 - Next: <the precise next action — also copied to section 1>
 - Watch out: <gotchas, flaky tests, decisions the next agent must know>
 ```
+
+### 2026-11-20 — Claude (chat, cloned the public repo) — B2-06
+- Did: search provider and `researcher`.
+  - `backend/app/providers/search.py`, `backend/app/agents/nodes/researcher.py`; `TAVILY_API_KEY` in `core/config.py`, `.env.example`, ARCHITECTURE section 10.
+  - Tests: `tests/unit/test_search_provider.py` (fake, Tavily with `httpx.MockTransport`, registry), `tests/unit/test_researcher_node.py` (spec and prompt contract, agent, rule checks, judge, retry, escalation and resume, config error escalating at once).
+  - Docs: `TASKS.md` ticked, `ARCHITECTURE.md` new 6.10 and section 10, `AGENT_SPECS.md` 3.3 note, this file.
+- State: `ruff check` clean; 1172 passed, 0 skipped (PostgreSQL 16 on 15432 and Redis started in the sandbox; baseline 1084); new modules 100% line and branch. Docker not run; no new dependency; no mutation run this time.
+- Left undone: nothing for B2-06. Not done on purpose: a live Tavily contract test, reading limits from `system_settings`.
+- Next: `B2-07` (strategist node); see section 1.
+- Watch out: in `fake_llm` tests the order of replies is queries, summary, judge (the judge runs only if the rules pass and the notes are grounded); a retry repeats the queries call too. `make format` reformats `services/seed.py` and `tests/integration/test_admin_seed.py` (still unformatted on purpose): run `ruff format` on touched files only, or revert those two.
 
 ### 2026-11-20 — Claude (chat, cloned the public repo) — B2-05
 - Did: `validate_input` and `planner`.
