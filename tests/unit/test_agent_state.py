@@ -30,6 +30,7 @@ EXPECTED_STATE_FIELDS = {
     "publish_at",
     "brand_voice",
     "language",
+    "options",
     "plan",
     "research",
     "strategy",

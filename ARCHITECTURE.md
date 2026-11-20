@@ -201,6 +201,7 @@ class GraphState(TypedDict, total=False):
     publish_at: str                # ISO-8601 UTC
     brand_voice: str | None
     language: str
+    options: dict                  # extra request options (tone override, ...); user-controlled
     plan: dict | None
     research: dict | None
     strategy: dict | None          # keyed by platform
@@ -425,3 +426,9 @@ Runtime-tunable values (retry limits, lead times, metrics schedule, quotas, plat
 | D8 | Status transitions only via `transition()` | Single place for validation, notifications and audit. |
 
 Add new decisions here (D9, D10, ...) and mirror them in `PROGRESS.md` Decisions log.
+
+### 6.9 `validate_input` and `planner` (`app/agents/nodes/`, B2-05)
+
+- `validate_input` (`nodes/validate_input.py`) uses no LLM and no database. `make_validate_input_node(banned_words=, platform_rules=, check_accounts=, check_quota=)` returns the node; each hook is a plain callable evaluated on every run. Defaults: `no_banned_words` (stub until `moderation_rules` exists, B5-08) and `platform_rules.default_platform_rules` (the code defaults of AGENT_SPECS section 2). `check_accounts(state)` (account active, right workspace, can post this type) and `check_quota(state)` need B3 tables and run only if the request is well formed. All problems are collected; with any, the node returns `{"status": "failed", "errors": [...]}` and `route_after_validation` returns `"failed"` (the graph ends), otherwise `{"status": "generating"}` and `"ok"`. Error messages are for the submitter and never name the banned word that matched.
+- `agents/platform_rules.py` holds the default per-platform rules and `platform_supports(rules, platform, content_type)`: an explicit `allowed_formats` list wins, otherwise `image_aspect` means `post` and `video_aspect` means `video`.
+- `planner` (`nodes/planner.py`): `make_planner_node(max_retries=, judge_threshold=, use_judge=, platform_rules=)` returns a `CheckedNode` (section 6.3) with step key `planner`. The agent renders prompt `planner` and stores `ContentPlan.model_dump()` in `state["plan"]`; rule checks: 2 to 5 non-empty key messages, angle and audience filled, plan language equal to the requested one (case-insensitive, `_` equals `-`); the judge (prompt `judge`, `kind="fast"`, rubric in code) sees the plan and the rules of the target platforms only. `ContentPlan` enforces only the shape (`goal` values), so rule failures get retry feedback instead of a silent schema repair.

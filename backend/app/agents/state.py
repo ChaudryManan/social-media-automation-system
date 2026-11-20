@@ -54,6 +54,7 @@ class GraphState(TypedDict, total=False):
     publish_at: str  # ISO-8601 UTC
     brand_voice: str | None
     language: str
+    options: dict  # extra request options (tone override, ...); user-controlled
 
     # agent outputs
     plan: dict | None

@@ -96,7 +96,8 @@ Rules in checks read from this setting. `*_max_seconds` for YouTube Shorts-style
 - **Input:** `topic`, `content_type`, `target_accounts`, `publish_at`, `options`, workspace + moderation rules.
 - **Output:** no LLM required. Writes `errors: list[str]` and ends the graph with status `failed` if any.
 - **Rule checks:** topic length 3–500 chars, not only symbols; accounts active; content type supported by every target platform (e.g. no `video` target on an account that cannot post video — error); banned words; per-user generation quota not exceeded.
-- **Optional LLM safety classifier:** off by default (`safety_classifier_enabled`); if on, returns `{safe: bool, reason}`.
+- **Optional LLM safety classifier:** off by default (`safety_classifier_enabled`); if on, returns `{safe: bool, reason}`. *(Not implemented yet.)*
+- **Implementation (B2-05):** topic length is measured after trimming; banned words match whole words or phrases, case-insensitively, in the topic, brand voice and string values of `options`; `options` must be an object of at most 2000 characters; `publish_at` must be ISO-8601 with a time zone ("in the future" is checked at submission, B3-05); account state and the quota are hooks filled in by B3. See ARCHITECTURE 6.9.
 
 ### 3.2 `planner`
 - **Input:** topic, content_type, target platforms, brand_voice, language, options.
@@ -115,7 +116,7 @@ class ContentPlan(BaseModel):
     language: str
 ```
 - **Prompt rules:** one clear angle; messages must serve the goal; respect brand voice; no invented data.
-- **Rule checks:** 2–5 key messages, non-empty angle/audience, language matches requested.
+- **Rule checks:** 2–5 key messages, non-empty angle/audience, language matches requested. (`cta`, `must_avoid` and `risks` are optional in the schema and default to `None` / empty lists.)
 - **Judge rubric (0–1):** relevance to topic, clarity of angle, audience fit, brand-voice fit.
 
 ### 3.3 `researcher`
