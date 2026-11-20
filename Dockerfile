@@ -14,6 +14,10 @@ RUN pip install --no-cache-dir \
         "argon2-cffi==23.1.0" \
         "celery==5.5.3" \
         "fastapi==0.115.12" \
+        "langchain-core==0.3.61" \
+        "langgraph==0.4.7" \
+        "langgraph-checkpoint==2.0.26" \
+        "langgraph-prebuilt==0.2.3" \
         "psycopg[binary]==3.2.9" \
         "pydantic==2.11.4" \
         "pydantic-settings==2.9.1" \

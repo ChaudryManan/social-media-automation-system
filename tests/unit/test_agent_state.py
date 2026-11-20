@@ -36,6 +36,7 @@ EXPECTED_STATE_FIELDS = {
     "drafts",
     "retries",
     "feedback",
+    "attempt_info",
     "review",
     "review_cycles",
     "rerun_from",

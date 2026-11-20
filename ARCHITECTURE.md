@@ -207,6 +207,7 @@ class GraphState(TypedDict, total=False):
     drafts: dict[str, PlatformDraft]   # keyed by platform
     retries: dict[str, int]        # keyed by step key, e.g. "writer", "scene:2"
     feedback: dict[str, str | None]    # last checker feedback per step key
+    attempt_info: dict[str, dict]      # last attempt per step key; written only by checked.py
     review: dict | None
     review_cycles: int
     rerun_from: str | None
@@ -227,22 +228,32 @@ flowchart LR
   A["agent node"] --> C{"check node"}
   C -->|pass| N["next node"]
   C -->|"fail and retries < max"| A
-  C -->|"fail and retries >= max"| E["escalate (interrupt: needs_attention)"]
+  C -->|"fail and retries >= max"| E["escalate node (interrupt: needs_attention)"]
+  E -->|"resume: retry (counter reset)"| A
+  E -->|"resume: abort"| X["end: failed"]
 ```
 
 ```python
-# app/agents/checked.py  (contract)
-def make_checked_node(key: str, agent_fn, check_fn, max_retries: int):
-    """Returns (agent_node, check_node, route_fn).
-    - agent_node reads state.feedback[key] (if any) and produces output into state.
-    - check_node returns {"ok": bool, "feedback": str}; increments state.retries[key] on failure.
-    - route_fn returns "pass" | "retry" | "escalate".
-    Every attempt is persisted as an agent_steps row (attempt number, verdict, feedback, tokens, latency)."""
+# app/agents/checked.py  (B2-04)
+def make_checked_node(key, agent_fn, check_fn, max_retries=3, *, judge_fn=None, judge_threshold=0.7) -> CheckedNode:
+    """CheckedNode has .agent, .check, .escalate, .route, .route_resolution (+ node names).
+    - agent_fn(state) -> state update (dict) or AgentOutput(update, prompt_version, summary, refused_reason);
+      reads state.feedback[key]; may raise AppError.
+    - check_fn(state) -> CheckResult (rule checks). judge_fn(state) -> CheckResult runs only if the rules pass
+      and must reach judge_threshold.
+    - route(state) -> "pass" | "retry" | "escalate"; route_resolution(state) -> "retry" | "abort"."""
+
+def add_checked_node(graph, checked, *, on_pass, on_abort=END) -> str:  # wires the three nodes, returns the entry node
 ```
 
-- Checks combine **rule checks** (length limits, hashtag count, image present/size, video duration/aspect ratio, audio-video sync, subtitle timing, banned words) with an **LLM judge** only where judgement is needed (tone, relevance, factual consistency).
-- Escalation sets `needs_attention`, notifies the user, and interrupts. Resume payload `{action: "retry" | "abort"}` via `POST /requests/{id}/resolve`. `retry` resets that step's counter.
-- Max retries come from `system_settings` (`max_retries_default=3`, `max_retries_scene=2`).
+- `max_retries` is the number of **failed attempts** a step may have before it escalates, so the default 3 means three attempts in total (video scene: 2).
+- **Bookkeeping** is in `state.retries[key]` (failed attempts since the last reset), `state.feedback[key]` (what the next attempt sees; `None` after a pass) and `state.attempt_info[key]` (attempt number, outcome, usage, issues of the last attempt). The attempt number keeps counting up across counter resets; the retry counter does not.
+- Checks combine **rule checks** (length limits, hashtag count, image present/size, video duration/aspect ratio, audio-video sync, subtitle timing, banned words) with an **LLM judge** only where judgement is needed (tone, relevance, factual consistency). `CheckResult`/`Issue` are defined in `AGENT_SPECS.md` 1.5.
+- Only `AppError`s (LLM provider/output errors, ...) count as a failed attempt (verdict `error`; the previous checker feedback is kept). Any other exception is a bug: it is recorded as an `error` step and re-raised. A non-retriable error (`retriable=False`, `LLMConfigError`) and a refusal (`AgentOutput.refused_reason`, AGENT_SPECS 1.7) escalate immediately.
+- **Escalation** is a separate node that calls `interrupt()` with `{"type": "needs_attention", "step", "reason" (retries_exhausted | refused | non_retriable_error), "attempts", "max_retries", "feedback", "error_code", "refused", "issues"}`. The worker (B3) turns that interrupt into request status `needs_attention` and a notification. Resume value `{"action": "retry" | "abort"}` (via `POST /requests/{id}/resolve`, which must always send a non-empty object): `retry` resets that step's counter and keeps its feedback (`status` = `generating`); `abort` records a `failed` step, appends to `errors`, sets `status` = `failed` and goes to `on_abort`. Any other resume value is **not** an error: the node asks again (a new interrupt with `error: "invalid_resolution"`), because LangGraph would replay a raised bad value on every later resume.
+- **Step logging:** one `agent_steps` row per attempt (`node_name` = key, e.g. `writer`, `scene:2`): verdict `passed`, `retried`, `escalated` or `error`, plus `failed` when a human aborts. Tokens, cost and model are the sum for the agent and the judge (`llm.capture_usage()`); `latency_ms` is the model time, `output_summary.duration_ms` the wall-clock time. Rows go through a recorder: `config["configurable"]["step_recorder"]` (callable, tests/dev runner) or `config["configurable"]["run_id"]` (database recorder, one transaction per row). With neither, nothing is stored. A recorder that fails is logged and does not stop the workflow.
+- Log lines written inside an attempt carry `node`, `attempt` and `run_id` (context variables).
+- Max retries come from `system_settings` (`max_retries_default=3`, `max_retries_scene=2`, `judge_pass_threshold=0.7`); the node builders read them and pass them in (the factory takes plain numbers).
 
 ### 6.4 Video subgraph details
 

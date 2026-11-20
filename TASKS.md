@@ -48,7 +48,7 @@ Goal: run the full post-generation graph from a CLI with a fake LLM, including r
   **Done when:** inserting and querying a run with steps works. **Dep:** B1-04.
 - [x] **B2-03 State and prompts** — `agents/state.py` per `ARCHITECTURE.md` 6.2; `agents/prompts/` with one prompt file per agent (placeholders, no secrets).
   **Done when:** state types import and a prompt loader test passes. **Dep:** B2-01.
-- [ ] **B2-04 Checked-node factory** — `agents/checked.py::make_checked_node` implementing agent→check→(pass|retry|escalate), per-step counters, feedback passing, step logging (B2-02), escalate via interrupt.
+- [x] **B2-04 Checked-node factory** — `agents/checked.py::make_checked_node` implementing agent→check→(pass|retry|escalate), per-step counters, feedback passing, step logging (B2-02), escalate via interrupt.
   **Done when:** tests: pass first time; fail twice then pass; exhausts retries and escalates; resume with `retry` resets the counter. **Dep:** B2-02, B2-03. Refs: FR-6.1–6.3.
 - [ ] **B2-05 validate_input and planner nodes** — moderation hook (stub reading rules, real table arrives in B5), plan schema.
   **Done when:** node tests with fake LLM; invalid input ends the graph with `errors`. **Dep:** B2-03.

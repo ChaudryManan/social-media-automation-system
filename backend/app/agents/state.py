@@ -64,6 +64,7 @@ class GraphState(TypedDict, total=False):
     # retry / review bookkeeping
     retries: dict[str, int]  # keyed by step key, e.g. "writer", "scene:2"
     feedback: dict[str, str | None]  # last checker feedback per step key
+    attempt_info: dict[str, dict]  # last attempt per step key (checked.py only)
     review: dict | None
     review_cycles: int
     rerun_from: str | None

@@ -338,7 +338,7 @@ For each agent keep two scripted responses in `tests/fixtures/agents/<agent>/`:
 - `good.json` — passes all rule checks.
 - `bad_<reason>.json` — fails exactly one rule (e.g. `writer/bad_too_long.json`, `hashtag/bad_duplicates.json`, `script/bad_duration.json`).
 
-Mandatory tests per checked agent: pass first try; `bad` then `good` (retry changes the output and the second prompt contains the feedback); `bad` ×(max+1) escalates; refusal path (`refused=true`) escalates; judge below threshold fails; rules short-circuit the judge (judge not called when rules fail).
+Mandatory tests per checked agent: pass first try; `bad` then `good` (retry changes the output and the second prompt contains the feedback); `bad` ×max escalates (`max_retries` = failed attempts allowed, so 3 attempts by default; see ARCHITECTURE 6.3); refusal path (`refused=true`) escalates; judge below threshold fails; rules short-circuit the judge (judge not called when rules fail).
 
 Example good writer output (fixture sketch):
 ```json
