@@ -170,6 +170,7 @@ class VideoStrategy(BaseModel):
 ```
 - **Rule checks:** one strategy per target platform; values within platform rules; scene_count within settings.
 - **Judge rubric:** platform fit, consistency with plan, brand-voice fit.
+- **Implementation notes (B2-07):** the reply is parsed as a `RootModel` (`StrategyReply`) keyed by platform. The rule checks also require non-empty `tone`, `structure`, `media_notes`, `posting_notes` and video `style`, `platform` equal to the key, `video` null for a post and present for a video, and `length_target >= 1`. A missing limit in the platform rules means no bound. See `ARCHITECTURE.md` 6.11.
 
 ## 4. Post flow
 
