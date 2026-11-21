@@ -193,6 +193,8 @@ class WriterOutput(BaseModel):
 - **Rule checks:** within platform length limit and within ±30% of `length_target`; non-empty hook; no banned words; no hashtags inside caption body (hashtag agent owns them); no raw URLs unless strategy allows; no unfilled placeholders like `[brand]` or `{{`; language matches.
 - **Judge rubric:** hook strength, clarity, tone/brand-voice fit, factual safety (claims supported by research), CTA fit, absence of filler.
 
+**Implementation notes (B2-10):** see `ARCHITECTURE.md` 6.14. One step per node handles every target platform. `hook`, `cta` and `language` of `WriterOutput` are not stored in the draft (state is fixed by ARCHITECTURE 6.2): the hook is the caption's first line and language fit is judged. A `#tag` in the body is `#` followed by a letter. The title is required for YouTube and must be empty elsewhere.
+
 ### 4.2 `image`
 - **Step A (LLM): image prompt.**
 ```python
@@ -208,12 +210,15 @@ class ImagePrompt(BaseModel):
 - **Rule checks:** file is a valid image; format png/jpg/webp; size under limit; aspect ratio allowed; min resolution (default 1024 on the short side, setting).
 - **Judge (optional, only if a vision-capable model is configured, `image_judge_enabled`):** relevance to caption, no visible gibberish text, no unsafe content, brand-fit. If disabled, the judge evaluates prompt vs caption only.
 
+**Implementation notes (B2-10):** the LLM's `aspect_ratio` is moved to an allowed ratio before the image is generated; `negative_prompt` is appended to the text as `Avoid: ...` (the provider has no such input); the checks read the stored bytes (real size and ratio, 3 % tolerance, 8 MiB default size limit, `min_short_side` 1024). The judge is the text-only variant.
+
 ### 4.3 `hashtag`
 - **Input:** final caption, plan, strategy (`hashtag_count`), platform rules, language.
 - **Output:** `HashtagOutput(hashtags: list[str])`.
 - **Rules:** each starts with `#`, no spaces or punctuation inside, unique (case-insensitive), within platform min/max, mix of broad (1–2), niche (rest), at least one topic-specific; no banned/misleading/trending-hijack tags; no brand names that are not in the brief.
 - **Rule checks:** all the above are mechanical; length per tag ≤ 40 chars.
 - **Judge:** none needed (rule-only) unless `hashtag_judge_enabled`.
+- **Implementation notes (B2-10):** a tag is `#` + letters/digits/`_` (any script), at most 40 characters including the `#`; the count must be within the platform min/max (not necessarily equal to `hashtag_count`); the broad/niche mix and topic fit are prompt rules only; `hashtag_judge_enabled` is not built.
 
 ## 5. Final review
 

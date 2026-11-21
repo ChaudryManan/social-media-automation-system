@@ -1,0 +1,3971 @@
+diff --git a/.gitignore b/.gitignore
+index 0790b8b..e016a32 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,6 +1,6 @@
+ .env
+ .venv/
+-storage/
++/storage/
+ __pycache__/
+ *.py[cod]
+ .pytest_cache/
+diff --git a/AGENT_SPECS.md b/AGENT_SPECS.md
+index 02d1a9a..999d71b 100644
+--- a/AGENT_SPECS.md
++++ b/AGENT_SPECS.md
+@@ -193,6 +193,8 @@ class WriterOutput(BaseModel):
+ - **Rule checks:** within platform length limit and within ±30% of `length_target`; non-empty hook; no banned words; no hashtags inside caption body (hashtag agent owns them); no raw URLs unless strategy allows; no unfilled placeholders like `[brand]` or `{{`; language matches.
+ - **Judge rubric:** hook strength, clarity, tone/brand-voice fit, factual safety (claims supported by research), CTA fit, absence of filler.
+ 
++**Implementation notes (B2-10):** see `ARCHITECTURE.md` 6.14. One step per node handles every target platform. `hook`, `cta` and `language` of `WriterOutput` are not stored in the draft (state is fixed by ARCHITECTURE 6.2): the hook is the caption's first line and language fit is judged. A `#tag` in the body is `#` followed by a letter. The title is required for YouTube and must be empty elsewhere.
++
+ ### 4.2 `image`
+ - **Step A (LLM): image prompt.**
+ ```python
+@@ -208,12 +210,15 @@ class ImagePrompt(BaseModel):
+ - **Rule checks:** file is a valid image; format png/jpg/webp; size under limit; aspect ratio allowed; min resolution (default 1024 on the short side, setting).
+ - **Judge (optional, only if a vision-capable model is configured, `image_judge_enabled`):** relevance to caption, no visible gibberish text, no unsafe content, brand-fit. If disabled, the judge evaluates prompt vs caption only.
+ 
++**Implementation notes (B2-10):** the LLM's `aspect_ratio` is moved to an allowed ratio before the image is generated; `negative_prompt` is appended to the text as `Avoid: ...` (the provider has no such input); the checks read the stored bytes (real size and ratio, 3 % tolerance, 8 MiB default size limit, `min_short_side` 1024). The judge is the text-only variant.
++
+ ### 4.3 `hashtag`
+ - **Input:** final caption, plan, strategy (`hashtag_count`), platform rules, language.
+ - **Output:** `HashtagOutput(hashtags: list[str])`.
+ - **Rules:** each starts with `#`, no spaces or punctuation inside, unique (case-insensitive), within platform min/max, mix of broad (1–2), niche (rest), at least one topic-specific; no banned/misleading/trending-hijack tags; no brand names that are not in the brief.
+ - **Rule checks:** all the above are mechanical; length per tag ≤ 40 chars.
+ - **Judge:** none needed (rule-only) unless `hashtag_judge_enabled`.
++- **Implementation notes (B2-10):** a tag is `#` + letters/digits/`_` (any script), at most 40 characters including the `#`; the count must be within the platform min/max (not necessarily equal to `hashtag_count`); the broad/niche mix and topic fit are prompt rules only; `hashtag_judge_enabled` is not built.
+ 
+ ## 5. Final review
+ 
+diff --git a/ARCHITECTURE.md b/ARCHITECTURE.md
+index da5c521..6f5f845 100644
+--- a/ARCHITECTURE.md
++++ b/ARCHITECTURE.md
+@@ -471,3 +471,11 @@ Add new decisions here (D9, D10, ...) and mirror them in `PROGRESS.md` Decisions
+ - Persistence: `postgres_checkpointer(database_url=None, setup=True)` is a context manager yielding a `PostgresSaver` (default URL `DATABASE_URL`; the SQLAlchemy `+psycopg` suffix is stripped by `to_psycopg_url`); `setup()` creates the `checkpoints`, `checkpoint_blobs`, `checkpoint_writes` and `checkpoint_migrations` tables in the connection's default schema. `thread_config(request_id, **extra)` builds the run config (`thread_id = request_id`, plus `run_id` or `step_recorder`). Dependencies: `langgraph-checkpoint-postgres==2.0.23` (needs `langgraph-checkpoint>=2.0.21,<3`) and `psycopg-pool==3.3.3`, pinned in `pyproject.toml` and the `Dockerfile`.
+ - A paused run (escalation) is resumed from a new connection, saver, graph and node objects with `Command(resume={"action": "retry" | "abort"})` on the same `thread_id` (covered by an integration test).
+ 
++### 6.14 Post subgraph (`app/agents/post/`, B2-10)
++
++- `make_post_subgraph(writer=, image=, hashtag=)` returns the compiled subgraph `START -> writer -> image -> hashtag -> END`, each step a checked node (6.3). Pass it as `build_graph(post_subgraph=...)`; it inherits the parent's checkpointer, so an escalation inside it pauses and resumes with the run. `make_writer_node`, `make_image_node` and `make_hashtag_node` return `CheckedNode`s (step keys `writer`, `image`, `hashtag`) and take `max_retries` and `platform_rules` (and `judge_threshold`, `use_judge`, `banned_words` where they apply) from the worker (B3). An aborted escalation ends the subgraph with `status="failed"`. `rerun_from` is not read yet (B2-11).
++- Every step handles all distinct target platforms in one attempt (FR-5.5) and merges into `drafts[platform]`: writer sets `caption` and `title` (a stale title is removed), image replaces the `image` entry of `media` (other media are kept), hashtag sets `hashtags`. Rules, banned words and strategy are read on every run. A missing caption or strategy is a bug (`ValueError`), not a retry.
++- **writer** (`WriterOutput`, temperature 0.8): checks are caption present, within `caption_max` (else `description_max`) and within +-30 % of `strategy.length_target`, no banned word, no `#tag`, raw URL or placeholder in the body, `title` required (and at most `title_max`) for YouTube and empty elsewhere. `refused=true` escalates at once with `"<platform>: <reason>"`. The judge (`kind="fast"`) rubric `WRITER_RUBRIC` carries the research notes.
++- **image** (`ImagePrompt`, temperature 0.7): the prompt's aspect ratio is moved to an allowed one, `get_image_provider().generate(prompt, size)` runs with `1024` on the short side, `get_storage_backend().put` stores the bytes under `requests/<request_id>/<platform>/image-<attempt>.<ext>` and the draft gets `{"type": "image", "storage_key", "meta": {prompt, aspect_ratio, alt_text, style_notes, provider, size_bytes, mime_type, width, height}}` (the `media_assets` table arrives in B3). The checks read the stored bytes back (valid image, size, short side, real aspect ratio) and check the alt text; the judge (`IMAGE_RUBRIC`) is text-only (prompt + alt text against the caption).
++- **hashtag** (`HashtagOutput`, temperature 0.5): rule-only. Tags are `#` + letters/digits/`_`, at most 40 characters, unique ignoring case, within `hashtags_min`/`hashtags_max`, none banned.
++- Limits that are node parameters until B3 reads `system_settings`: `min_short_side` (1024) and `max_image_bytes` (8 MiB) for the image, `use_judge`, `judge_threshold`, `max_retries`.
+diff --git a/PROGRESS.md b/PROGRESS.md
+index 73634c3..88a6f4c 100644
+--- a/PROGRESS.md
++++ b/PROGRESS.md
+@@ -7,10 +7,11 @@
+ 
+ ## 1. NEXT ACTION (one precise step)
+ 
+-> **Start task `B2-10` (post subgraph: writer, image, hashtag) in `TASKS.md`. `B2-01` to `B2-09` are done.**
+-> Read `AGENT_SPECS.md` sections 4.1 to 4.3 (output schemas, rule checks, judge rubrics) and 6 (test fixtures) first. Create `backend/app/agents/post/` (package exists, empty): three nodes built with `make_checked_node` (step keys `writer`, `image`, `hashtag`; per platform, generated once per distinct platform and reused for all its accounts, FR-5.5), wired `writer -> image -> hashtag` into a subgraph that replaces `post_placeholder` in `build_graph` (pass it as `post_subgraph`). The subgraph writes `drafts[platform]` = `PlatformDraft` (`caption`, `hashtags`, `media: [{"type": "image", "storage_key": ..., "meta": {...}}]`, `title` for YouTube). Prompts `writer`, `image` and `hashtag` already exist in `app/agents/prompts/` (add a test that each prompt's JSON example fields equal the new Pydantic model's fields, as the other node tasks did). Use what B2-09 added: `get_image_provider().generate(prompt, size)`, `get_storage_backend().put(key, data, mime)` and `read_image_info(data)` / `detect_image_mime(data)` from `app/providers/image.py` for the image rule checks (valid image, png/jpeg/webp, size limit, allowed aspect ratio, min 1024 on the short side). `size` is a **request**: you need a small helper that turns an allowed aspect ratio (`"4:5"`) into a `(width, height)` with a 1024 short side, and the check must read the real size from the bytes. The `media_assets` table does not exist until B3, so keep `storage_key` and `meta` in the draft only. Rule checks and limits come from the injected `platform_rules()` callable (`agents/platform_rules.py`), as in B2-05..B2-07. Done when (TASKS): the subgraph produces `drafts[platform]` with caption, hashtags and one image per platform, and a test shows the retry feedback visibly changes the second attempt. Do not start B2-11 in the same change.
++> **Start task `B2-11` (reviewer and `route_after_review`) in `TASKS.md`. `B2-01` to `B2-10` are done.**
++> Read `AGENT_SPECS.md` sections 5.1 and 5.2 (reviewer schemas, routing, re-entry table) and 1.5 to 1.7 first, and `ARCHITECTURE.md` 6.14 (what the post subgraph does and does not do). Create `backend/app/agents/nodes/reviewer.py` (`ReviewIssue`, `ReviewResult`, a checked-style node or a plain node with the reviewer prompt that already exists, rule checks for platform fit: caption limit, hashtag range, image aspect and size, banned words) and `route_after_review` in `graph.py`: `ok` -> end for now (the approval step is B3), errors and `review_cycles < max_review_cycles` (2) -> set `rerun_from` to the **earliest** responsible node, increment `review_cycles`, put each issue's `fix_hint` into `feedback[node]`, **reset `retries[node]`** for the nodes that rerun, and route back to `content_router`; cap reached -> continue with the remaining issues as warnings. The post subgraph does **not** read `rerun_from` yet (B2-10 left it to you): add the entry routing inside `post/subgraph.py` (`writer` -> writer, hashtag; `image` -> image only; `hashtag` -> hashtag only, AGENT_SPECS 5.2) and keep each node merging into `drafts` as it does now. Also: after an aborted escalation the subgraph ends with `status="failed"`, so `route_after_review` must not run the reviewer then. Done when (TASKS): tests for the ok path, the fix path and the cycle cap (continues to approval with warnings). Do not start B2-12 in the same change.
++> **Before coding, fix the repo first (see section 8, "storage files never committed"): `git add backend/app/storage/base.py backend/app/storage/local.py` and commit the `.gitignore` fix.**
+ 
+-Last updated: 2026-11-21 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B2-09: storage and image provider`
++Last updated: 2026-11-21 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B2-09: storage and image provider` (B2-10 is uncommitted: copy the files listed in section 9, then commit as `B2-10: post subgraph (writer, image, hashtag)`)
+ 
+ ## 2. How to resume (any agent)
+ 
+@@ -25,7 +26,7 @@ Last updated: 2026-11-21 · Last agent: Claude (chat, via cloned repo) · Branch
+ |---|---|---|---|
+ | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
+ | B1 | Foundation: auth, roles, workspaces, limits | Done | 11 / 11 |
+-| B2 | Agent engine (post flow) | In progress | 9 / 13 |
++| B2 | Agent engine (post flow) | In progress | 10 / 13 |
+ | B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 19 |
+ | B4 | Video flow | Not started | 0 / 10 |
+ | B5 | Remaining backend (library, admin, more platforms) | Not started | 0 / 13 |
+@@ -43,6 +44,7 @@ Milestones:
+ 
+ ## 5. Recently completed (newest first, keep last ~10)
+ 
++- 2026-11-21 — B2-10 completed: post subgraph. `backend/app/agents/post/` (`common.py`; `writer.py`: `WriterOutput`, agent, rule checks, judge, `make_writer_node`; `image.py`: `ImagePrompt`, `parse_aspect_ratio`, `size_for_aspect_ratio`, `choose_aspect_ratio`, agent, rule checks that read the stored bytes, prompt-vs-caption judge, `make_image_node`; `hashtag.py`: `HashtagOutput`, agent, rule-only checks, `make_hashtag_node`; `subgraph.py`: `make_post_subgraph`). Step keys `writer`, `image`, `hashtag`; each handles every distinct target platform in one attempt (FR-5.5) and merges into `drafts[platform]` (`caption`, `title`, `hashtags`, `media`). New shared fixtures `fake_image` and `media_root` in `tests/conftest.py`. +260 tests (82 writer, 53 hashtag, 114 image, 11 subgraph incl. a full main-graph run and an escalation inside the subgraph resumed with `Command`); the five new modules 100% line and branch covered; 16 deliberate breakages, 15 caught (the survivor is an equivalent mutant). No new dependency, no migration, no new setting.
+ - 2026-11-21 — B2-09 completed: storage and image provider. `backend/app/storage/` (`base.py`: `StorageBackend` ABC with shared validation, `StorageError` family, `validate_key/mime/data`; `local.py`: `LocalStorage` with atomic writes and a resolved-path check; `__init__.py`: `get_storage_backend`), `backend/app/providers/image.py` (`ImageProvider`, `FakeImage`, `build_png`, `GeminiImage` over `httpx`, `get_image_provider`, `ImageError` family, `detect_image_mime`, `read_image_info`, `nearest_aspect_ratio`). New setting `IMAGE_MODEL` (`core/config.py`, `.env.example`, ARCHITECTURE env block). +215 tests (1519 passed, 0 skipped with real PostgreSQL 16 and Redis; baseline 1304); all four new modules 100% line and branch covered; 68 deliberate breakages, all caught after 3 gaps were closed (1 dead guard removed). No new dependency, no migration. New task B3-19 (shared media volume in Compose).
+ - 2026-11-20 — B2-08 completed: `backend/app/agents/graph.py` (`build_graph`, `compile_graph`, `content_router`, `route_content_type`, placeholder post/video subgraphs, `postgres_checkpointer`, `to_psycopg_url`, `thread_config`). New pinned dependencies `langgraph-checkpoint-postgres==2.0.23` and `psycopg-pool==3.3.3` (`pyproject.toml` and `Dockerfile`). +35 tests (30 unit, 5 integration on the real saver; 1304 passed, 0 skipped with PostgreSQL 16 and Redis; baseline 1269); `graph.py` 100% line and branch covered. No migration.
+ - 2026-11-20 — B2-07 completed: `backend/app/agents/nodes/strategist.py` (`VideoStrategy`, `PlatformStrategy`, `StrategyReply` root model, `make_strategy_agent`, `make_check_strategy`, `make_strategy_judge`, `make_strategist_node` returning a `CheckedNode`). +97 tests (1269 passed, 0 skipped with real PostgreSQL 16 and Redis; baseline 1172); the module is 100% line and branch covered. No new dependency, no migration, no new setting.
+@@ -78,6 +80,14 @@ Milestones:
+ 
+ | Date | ID | Decision | Why | Docs updated |
+ |---|---|---|---|---|
++| 2026-11-21 | B2-10-1 | One checked node per step handles **all** distinct target platforms in one attempt (step keys `writer`, `image`, `hashtag`, not `writer:<platform>`). Issue messages start with the platform name; the whole feedback string goes to every platform's prompt on a retry. | TASKS and the NEXT ACTION fix the three step keys; FR-5.5 asks for one generation per platform. A retry regenerates every platform (simple; image cost on retry is noted in section 8). | ARCHITECTURE 6.14 |
++| 2026-11-21 | B2-10-2 | `GraphState`/`PlatformDraft` unchanged: `hook`, `cta`, `language` of `WriterOutput` are **not** stored. The rule check treats the caption's first line as the hook; "language matches" and hook strength are judged by the writer judge (rubric points 1 and 3). | `PlatformDraft` is pinned by ARCHITECTURE 6.2 and `test_agent_state.py`; a check function only sees the state. Adding draft fields is a design change for you to decide (open question 4). | AGENT_SPECS 4.1, ARCHITECTURE 6.14 |
++| 2026-11-21 | B2-10-3 | Writer rule checks beyond a plain reading of the spec: hashtag in body = `#` followed by a letter (not `#1`, `C#`, `&#39;`); raw URL = `http(s)://` or `www.`; placeholder = `{{`/`}}`, `{name}` or `[short text]` (at most 40 chars, one line); the length window is `ceil(0.7*target)..floor(1.3*target)`; `title` is required for YouTube and must be empty elsewhere. Banned-word errors never name the word. | Makes "no hashtags / URLs / placeholders" precise and testable; strategy has no field that allows URLs, so they are always refused. | AGENT_SPECS 4.1 |
++| 2026-11-21 | B2-10-4 | Hashtag rules: a tag is `#` + `\w+` (letters, digits, `_`, any script), at most 40 characters **including** the `#`, unique ignoring case, count within the platform min/max (not required to equal `strategy.hashtag_count`), no banned word. The broad/niche mix and topic fit stay prompt rules. No judge for hashtags (AGENT_SPECS: rule-only unless `hashtag_judge_enabled`, which is not built). | Spec says all hashtag checks are mechanical; the mix cannot be checked mechanically. | AGENT_SPECS 4.3 |
++| 2026-11-21 | B2-10-5 | Image: the LLM's aspect ratio is moved to an allowed one (nearest on a log scale, first allowed if it is not a ratio) **before** the provider is called; the size request is `1024` on the short side (`min_short_side`, node parameter). The provider has no negative-prompt input, so `negative_prompt` is appended as `Avoid: ...`. The checks read the stored bytes back: valid PNG/JPEG/WebP (`read_image_info`), at most `max_image_bytes` (default 8 MiB), short side >= `min_short_side`, real ratio within 3 % of an allowed one, one image entry, alt text present and <= 200 chars. Real models may return less than 1024 on the short side: tune `min_short_side` if a live run fails that check. | A real model decides the resolution (B2-09-3); paying for an image and then failing on a ratio the code could have fixed is waste. | AGENT_SPECS 4.2, ARCHITECTURE 6.14 |
++| 2026-11-21 | B2-10-6 | Storage keys are `requests/<request_id>/<platform>/image-<attempt>.<png|jpg|webp|bin>`. The attempt number is the one the checked node will record, so a re-run of the same attempt overwrites its own object and a later attempt or a regeneration after approval never overwrites an image an earlier content version points to. Failed attempts leave their object behind (clean-up is a B5 library job). | DATABASE 6 rule 5: regenerating must never overwrite history. | ARCHITECTURE 6.14 |
++| 2026-11-21 | B2-10-7 | Image judge is the text-only variant (image prompt + alt text + caption against the plan), `use_judge=True` by default, kind `fast`. `image_judge_enabled` with a vision model is not built. The writer judge gets the research notes inside the rubric text because the shared `judge` prompt has no research input. | AGENT_SPECS 4.2 allows this variant; changing `judge.md` would change every other judge. | AGENT_SPECS 4.1, 4.2 |
++| 2026-11-21 | B2-10-8 | `make_post_subgraph()` returns a compiled subgraph (inherits the parent's checkpointer) to be passed to `build_graph(post_subgraph=...)`. `build_graph()`'s default stays the placeholder so the B2-08 tests keep their meaning; the dev runner (B2-12) and the worker (B3) pass the real one. `rerun_from` is **not** read by the subgraph yet (B2-11). | One task at a time (AGENTS 2); partial reruns need the reviewer's routing. | ARCHITECTURE 6.14 |
+ | 2026-11-21 | B2-09-1 | Storage lives in `backend/app/storage/` (`base.py`, `local.py`, `__init__.py` with `get_storage_backend`), not in `providers/`. `StorageBackend` is a template-method ABC: public `put/get/get_url/delete` validate and call `_put/_get/_url/_delete`. `put` returns the key; `get(key) -> bytes` was added to the interface (the publisher and tests need it); `delete` of a missing key is a no-op; `put` replaces. | Matches the ARCHITECTURE layout (`storage/base.py, local.py, s3.py`); a future S3 backend inherits the same validation instead of re-implementing it; idempotent jobs (AGENTS section 4). | ARCHITECTURE 6.13, section 7 |
+ | 2026-11-21 | B2-09-2 | Keys: relative, `/`-separated, max 512 chars, segments `[A-Za-z0-9][A-Za-z0-9._-]*` that do not end with `.` and are not Windows device names; `LocalStorage` also checks the resolved path stays inside the root (symlinks). Mime must be `type/subtype` and is validated but not stored locally; empty data is rejected. `get_url` for local storage is a `file://` URI. Errors never contain the key, data or a path. | The project is developed on Windows (reserved names, drive letters, backslashes) and keys will contain ids that come from the database; traversal must be impossible by construction. `media_assets.mime_type` already keeps the mime. HTTP serving of media belongs to the library/download endpoint (B5-01), which streams `get(key)`. | ARCHITECTURE 6.13 |
+ | 2026-11-21 | B2-09-3 | `ImageProvider.generate(prompt, size=(1024, 1024))`: `size` is a `(width, height)` tuple of ints in 1..4096 and is only a **request**. `FakeImage` honours it exactly; `GeminiImage` maps it to the closest of ten aspect ratios and the model decides the resolution. Callers read the real size from the bytes with the new `read_image_info` (PNG, JPEG, WebP header, no imaging library, no pixel decoding) and the mime with `detect_image_mime`. | The task text said `generate(prompt, size)` without a type; a platform needs an aspect ratio, a model gives its own resolution, so the checks of B2-10 must measure the result. Header readers were verified against Pillow (PNG, JPEG, WebP lossy/lossless/extended) outside the project; Pillow is not a dependency. | ARCHITECTURE 6.13 |
+@@ -152,6 +162,8 @@ Milestones:
+ ## 8. Known issues, blockers, open questions
+ 
+ **Known issues / tech debt:**
++- **Storage files never committed (found in B2-10, fix first):** `.gitignore` had a bare `storage/` line, which also ignored the source package `backend/app/storage/`, so `base.py` and `local.py` (B2-09) exist only on the machine that wrote them and a fresh clone cannot import `app.storage` (39 `test_storage.py` failures plus every module that imports it). The line is now `/storage/` (runtime media directory at the repo root only). Run `git add backend/app/storage/base.py backend/app/storage/local.py`, check `git status` for other ignored source files, and commit. The B2-10 tests were run against a throw-away stand-in of those two files, not against yours: run `make test` on your machine before committing.
++- Post subgraph (B2-10): a retry regenerates every platform, so an image failure on one platform pays again for the others; failed attempts leave their image object in storage; an outage on the second platform loses the first platform's image of that attempt. A per-platform retry would need per-platform step keys or a sidecar in the state. The caption + hashtags total length against `caption_max` (Instagram counts hashtags) is not checked by any step: B2-11's reviewer must check it. The judge prompts are untested against a real model.
+ - Storage and images (B2-09): `GeminiImage` was tested with a mocked HTTP layer only (no `-m live` contract test yet); the endpoint (`v1`) and the request field `responseFormat.image.aspectRatio` come from the docs page read on 2026-11-21, which elsewhere also shows older spellings (`v1beta`, `imageConfig`), so if a first live call returns HTTP 400 check those two first. A model decides the output resolution (1K by default), so `size` is only a request; there is no helper yet from an aspect-ratio string (`"4:5"`) to a size (B2-10 needs one). `STORAGE_BACKEND=s3` is a config error (not implemented). `put` has no size limit (the image rule check owns it) and nothing deletes old media (DATABASE.md 6 mentions an optional 30-day janitor). **`docker-compose.yml` has no volume for `STORAGE_PATH`: media written by `worker` is not visible to `api` and is lost on rebuild (task B3-19).** The relative default `./storage` is resolved against the working directory when the backend is built.
+ - Main graph (B2-08): the `Dockerfile` was edited (two new pins) but **not built** in this sandbox (no Docker); check `docker compose build` once. `postgres_checkpointer` opens one `psycopg` connection per `with` block (no pool): the Celery worker (B3) should open it once per process or per task and not share a saver between threads. Checkpoints are never deleted (retention is not designed yet; they grow with every step of every request). The placeholders end at `END`, so a finished run has no reviewer or approval yet (B2-11, B3-07). The Postgres integration test creates and drops the `ckpt_test` schema on the module's `sma_test` database.
+ - Strategist (B2-07): `length_target` for a video (seconds) and `video.target_duration_s` are checked separately and may differ; the video nodes (B4) should treat `video.target_duration_s` as the target. `format` (`short`/`long`) is not tied to a per-format duration limit (AGENT_SPECS section 2 says YouTube short vs long limits are configurable; there is only one `video_max_seconds` key today). `max_scenes` and the platform rules are injected arguments; nothing reads them from `system_settings` yet. Prompt wording is untested against a real model. The strategy is not told to match the plan's language beyond the prompt rule (no language check).
+@@ -184,6 +196,7 @@ Milestones:
+ 1. Which LLM, image, video and TTS providers should be used first (all behind interfaces; fake by default)? For the LLM this now blocks only the real provider (`gemini` raises `llm_not_configured` until one is registered); B2 can be finished with the fake.
+ 2. Which platform gets the first real publisher? (default plan: Facebook Pages, task B3-16.)
+ 3. Do the developer apps/accounts for Meta, Google and TikTok exist yet? (Needed only for live tests; not for B1–B3 offline work.)
++4. (B2-10) Should `PlatformDraft` get optional `hook`, `cta` and `language` fields so the writer's rule checks can verify the hook and the language mechanically (needs ARCHITECTURE 6.2 and `test_agent_state.py` changes)? Today the judge covers both.
+ 
+ ## 9. Handoff log (append-only, newest first)
+ 
+@@ -198,6 +211,16 @@ Template — copy for each session:
+ - Watch out: <gotchas, flaky tests, decisions the next agent must know>
+ ```
+ 
++### 2026-11-21 — Claude (chat, cloned the public repo) — B2-10
++- Did: post subgraph (writer, image, hashtag).
++  - `backend/app/agents/post/{__init__,common,writer,image,hashtag,subgraph}.py`; `.gitignore` (`storage/` -> `/storage/`); `tests/conftest.py` (fixtures `fake_image`, `media_root`).
++  - Tests: `tests/unit/test_writer_node.py` (82), `test_hashtag_node.py` (53), `test_image_node.py` (114), `test_post_subgraph.py` (11: full drafts, once per platform, order, retries inside the subgraph, escalation pause/resume, abort, refusal, whole main graph from request to drafts).
++  - Docs: `TASKS.md` B2-10 ticked, `ARCHITECTURE.md` new 6.14, `AGENT_SPECS.md` 4.1-4.3 notes, this file.
++- State: `ruff check` clean, new files `ruff format` clean; sandbox run without PostgreSQL: 1619 passed and 39 failed, the 39 all in `test_storage.py` because the sandbox had only a stand-in for the uncommitted storage files (see section 8). New modules 100% line and branch; 16 breakages, 15 caught. Integration tests and Docker not run. Nothing committed: no push access from the chat; the files above must be copied into your clone.
++- Left undone: nothing for B2-10. Not done on purpose: `rerun_from` handling (B2-11), a hashtag judge, a vision image judge, per-platform retry.
++- Next: `B2-11` (reviewer and `route_after_review`); see section 1.
++- Watch out: commit the two storage files first (section 8). Tests that call `get_storage_backend()` or `get_image_provider()` should use the new `media_root` and `fake_image` fixtures. In graph tests the order of fake LLM replies across writer/image/hashtag is awkward: `tests/unit/test_post_subgraph.py::PostLLM` answers by role (system prompt) and platform instead of by order, reuse it. I ran `ruff format` only on touched files (a blanket run also rewrites `services/seed.py` and `tests/integration/test_admin_seed.py`).
++
+ ### 2026-11-21 — Claude (chat, cloned the public repo) — B2-09
+ - Did: storage backend and image provider.
+   - `backend/app/storage/{base,local,__init__}.py`, `backend/app/providers/image.py`; new setting `IMAGE_MODEL` (`core/config.py`, `.env.example`).
+diff --git a/TASKS.md b/TASKS.md
+index e93f45a..52dfa7f 100644
+--- a/TASKS.md
++++ b/TASKS.md
+@@ -60,7 +60,7 @@ Goal: run the full post-generation graph from a CLI with a fake LLM, including r
+   **Done when:** invoking with `content_type=post` reaches the post placeholder and `video` the video placeholder. **Dep:** B2-07. Refs: FR-5.2.
+ - [x] **B2-09 Storage and image provider** — `StorageBackend` (local), `providers/image.py` (`FakeImage` returns a valid small PNG, one real provider by config).
+   **Done when:** put/get/delete test; fake image generates bytes with correct mime. **Dep:** B1-03.
+-- [ ] **B2-10 Post subgraph: writer, image, hashtag** — three checked nodes; rule checks (length limits from `platform_rules`, hashtag count, image present/size); LLM-judge for tone/relevance.
++- [x] **B2-10 Post subgraph: writer, image, hashtag** — three checked nodes; rule checks (length limits from `platform_rules`, hashtag count, image present/size); LLM-judge for tone/relevance.
+   **Done when:** subgraph produces `drafts[platform]` with caption, hashtags and one image per platform; retry feedback visibly changes the second attempt (test). **Dep:** B2-04, B2-08, B2-09. Refs: FR-5.3, FR-5.5.
+ - [ ] **B2-11 Reviewer and route_after_review** — final review returning issues with `responsible_node`; `fix` routes back to that node with feedback; `max_review_cycles` respected.
+   **Done when:** tests for ok path, fix path, and cycle cap (continues to approval with warnings). **Dep:** B2-10. Refs: FR-6.4.
+diff --git a/backend/app/agents/post/__init__.py b/backend/app/agents/post/__init__.py
+index 9cec7b4..e864a47 100644
+--- a/backend/app/agents/post/__init__.py
++++ b/backend/app/agents/post/__init__.py
+@@ -1 +1,16 @@
+-"""Post-generation subgraph package."""
++"""Post flow: ``writer -> image -> hashtag`` (``AGENT_SPECS.md`` section 4)."""
++
++from app.agents.post.hashtag import HashtagOutput, make_hashtag_node
++from app.agents.post.image import ImagePrompt, make_image_node
++from app.agents.post.subgraph import make_post_subgraph
++from app.agents.post.writer import WriterOutput, make_writer_node
++
++__all__ = [
++    "HashtagOutput",
++    "ImagePrompt",
++    "WriterOutput",
++    "make_hashtag_node",
++    "make_image_node",
++    "make_post_subgraph",
++    "make_writer_node",
++]
+diff --git a/backend/app/agents/post/common.py b/backend/app/agents/post/common.py
+new file mode 100644
+index 0000000..532791e
+--- /dev/null
++++ b/backend/app/agents/post/common.py
+@@ -0,0 +1,54 @@
++"""Helpers shared by the post-flow nodes (``AGENT_SPECS.md`` section 4)."""
++
++import json
++from collections.abc import Mapping
++from typing import Any
++
++from app.agents.checked import Issue
++from app.agents.platform_rules import PlatformRules
++from app.agents.state import GraphState
++
++NO_VALUE = "none"
++
++
++def target_platforms(state: GraphState) -> list[str]:
++    """Distinct target platforms in a stable order (FR-5.5: one draft each)."""
++    return sorted({account["platform"] for account in state["target_accounts"]})
++
++
++def to_json(value: Any) -> str:
++    """Prompt text for a structured value (``none`` when it is empty)."""
++    if not value:
++        return NO_VALUE
++    return json.dumps(value, ensure_ascii=False, sort_keys=True)
++
++
++def platform_rule(rules: PlatformRules, platform: str) -> Mapping[str, Any]:
++    """The rules of one platform (empty if it has none: no bounds)."""
++    return rules.get(platform) or {}
++
++
++def is_number(value: Any) -> bool:
++    return isinstance(value, int | float) and not isinstance(value, bool)
++
++
++def error(code: str, message: str) -> Issue:
++    return Issue(code=code, message=message, severity="error")
++
++
++def attempt_number(state: GraphState, key: str) -> int:
++    """The number the checked node will give the attempt that is about to run."""
++    previous = (state.get("attempt_info") or {}).get(key) or {}
++    return int(previous.get("attempt", 0)) + 1
++
++
++def require_strategy(state: GraphState, platform: str) -> Mapping[str, Any]:
++    """The strategy of ``platform``; a missing one is a bug, not a retry.
++
++    The strategist's rule check guarantees one strategy per target platform, so
++    reaching a content node without it means the graph was wired wrongly.
++    """
++    entry = (state.get("strategy") or {}).get(platform)
++    if not isinstance(entry, Mapping):
++        raise ValueError(f"no strategy for platform {platform!r}; run the strategist")
++    return entry
+diff --git a/backend/app/agents/post/hashtag.py b/backend/app/agents/post/hashtag.py
+new file mode 100644
+index 0000000..0dca6ba
+--- /dev/null
++++ b/backend/app/agents/post/hashtag.py
+@@ -0,0 +1,213 @@
++"""``hashtag``: the hashtags per platform (AGENT_SPECS 4.3).
++
++They are chosen from the final caption, so this step runs after the writer. It
++is rule-only (no judge): every rule in the spec is mechanical. The tags go to
++``drafts[platform]["hashtags"]``; other draft fields are kept.
++"""
++
++import re
++from collections.abc import Callable, Mapping
++from typing import Any
++
++from pydantic import BaseModel, ConfigDict
++
++from app.agents.checked import (
++    DEFAULT_MAX_RETRIES,
++    AgentOutput,
++    CheckedNode,
++    CheckResult,
++    Issue,
++    make_checked_node,
++)
++from app.agents.llm import generate_structured
++from app.agents.nodes.validate_input import (
++    BannedWords,
++    contains_banned_word,
++    no_banned_words,
++)
++from app.agents.platform_rules import PlatformRules, default_platform_rules
++from app.agents.post.common import (
++    error,
++    is_number,
++    platform_rule,
++    require_strategy,
++    target_platforms,
++    to_json,
++)
++from app.agents.prompts import load_prompt
++from app.agents.state import GraphState
++
++STEP_KEY = "hashtag"
++HASHTAG_TEMPERATURE = 0.5  # AGENT_SPECS 1.4
++MAX_TAG_CHARS = 40  # including the "#"
++_TAG = re.compile(r"#\w+")
++_MAX_LISTED = 5  # tags named in one message
++
++
++class HashtagOutput(BaseModel):
++    """The hashtag agent's reply (``AGENT_SPECS.md`` 4.3)."""
++
++    model_config = ConfigDict(str_strip_whitespace=True)
++
++    hashtags: list[str]
++
++
++def make_hashtag_agent(
++    platform_rules: Callable[[], PlatformRules] = default_platform_rules,
++    banned_words: BannedWords = no_banned_words,
++) -> Callable[[GraphState], AgentOutput]:
++    """Build the agent function; the retry feedback is added by the prompt loader."""
++
++    def hashtag_agent(state: GraphState) -> AgentOutput:
++        template = load_prompt("hashtag")
++        rules = platform_rules()
++        banned = ", ".join(banned_words())
++        feedback = (state.get("feedback") or {}).get(STEP_KEY)
++        drafts = dict(state.get("drafts") or {})
++        platforms = target_platforms(state)
++
++        for platform in platforms:
++            caption = (drafts.get(platform) or {}).get("caption")
++            if not caption:
++                raise ValueError(
++                    f"the hashtag step needs the {platform} caption; run the writer"
++                )
++            rule = platform_rule(rules, platform)
++            messages = template.messages(
++                feedback=feedback,
++                platform=platform,
++                hashtag_count=require_strategy(state, platform).get("hashtag_count"),
++                hashtag_min=rule.get("hashtags_min"),
++                hashtag_max=rule.get("hashtags_max"),
++                banned_words=banned,
++                language=state["language"],
++                caption=caption,
++                plan=to_json(state.get("plan")),
++            )
++            reply = generate_structured(
++                HashtagOutput, messages, temperature=HASHTAG_TEMPERATURE
++            )
++            draft = dict(drafts[platform])
++            draft["hashtags"] = list(reply.hashtags)
++            drafts[platform] = draft  # type: ignore[assignment]
++
++        return AgentOutput(
++            update={"drafts": drafts},
++            prompt_version=template.version,
++            summary={
++                "platforms": platforms,
++                "hashtag_counts": {p: len(drafts[p]["hashtags"]) for p in platforms},
++            },
++        )
++
++    return hashtag_agent
++
++
++def _names(tags: list[str]) -> str:
++    shown = ", ".join(tags[:_MAX_LISTED])
++    return shown + ", ..." if len(tags) > _MAX_LISTED else shown
++
++
++def _tag_issues(platform: str, tags: list[Any]) -> list[Issue]:
++    issues: list[Issue] = []
++    malformed = [t for t in tags if not isinstance(t, str) or not _TAG.fullmatch(t)]
++    if malformed:
++        issues.append(
++            error(
++                "hashtag_invalid",
++                f"{platform}: each hashtag must start with # and use only letters, "
++                f"digits or underscores, without spaces. Fix: "
++                f"{_names([str(t) for t in malformed])}.",
++            )
++        )
++    too_long = [t for t in tags if isinstance(t, str) and len(t) > MAX_TAG_CHARS]
++    if too_long:
++        issues.append(
++            error(
++                "hashtag_too_long",
++                f"{platform}: hashtags can have at most {MAX_TAG_CHARS} characters. "
++                f"Shorten: {_names(too_long)}.",
++            )
++        )
++    seen: set[str] = set()
++    repeated: list[str] = []
++    for tag in tags:
++        folded = str(tag).casefold()
++        if folded in seen:
++            repeated.append(str(tag))
++        seen.add(folded)
++    if repeated:
++        issues.append(
++            error(
++                "hashtag_duplicate",
++                f"{platform}: remove the repeated hashtags ({_names(repeated)}); "
++                "ignore upper and lower case.",
++            )
++        )
++    return issues
++
++
++def _range_issue(platform: str, count: int, rule: Mapping[str, Any]) -> list[Issue]:
++    low, high = rule.get("hashtags_min"), rule.get("hashtags_max")
++    if (is_number(low) and count < low) or (is_number(high) and count > high):
++        return [
++            error(
++                "hashtag_count_range",
++                f"{platform}: give between {low if is_number(low) else 0} and "
++                f"{high if is_number(high) else 'the platform maximum'} hashtags, "
++                f"not {count}.",
++            )
++        ]
++    return []
++
++
++def make_check_hashtag(
++    platform_rules: Callable[[], PlatformRules] = default_platform_rules,
++    banned_words: BannedWords = no_banned_words,
++) -> Callable[[GraphState], CheckResult]:
++    """Rule checks (AGENT_SPECS 4.3): a list of well-formed tags (``#`` then letters,
++    digits or ``_``), at most 40 characters each, unique ignoring case, within the
++    platform's min and max, none banned. The broad/niche mix and topic fit are
++    prompt rules, not mechanical checks. Rules are read on every run.
++    """
++
++    def check(state: GraphState) -> CheckResult:
++        drafts = state.get("drafts") or {}
++        rules = platform_rules()
++        banned = banned_words()
++        issues: list[Issue] = []
++
++        for platform in target_platforms(state):
++            tags = (drafts.get(platform) or {}).get("hashtags")
++            if not isinstance(tags, list):
++                issues.append(
++                    error("hashtags_missing", f"{platform}: add the hashtags.")
++                )
++                continue
++            issues += _tag_issues(platform, tags)
++            issues += _range_issue(platform, len(tags), platform_rule(rules, platform))
++            if contains_banned_word([str(t).lstrip("#") for t in tags], banned):
++                issues.append(
++                    error(
++                        "banned_word",
++                        f"{platform}: a hashtag is a banned word. Replace it.",
++                    )
++                )
++        return CheckResult.from_issues(issues)
++
++    return check
++
++
++def make_hashtag_node(
++    *,
++    max_retries: int = DEFAULT_MAX_RETRIES,
++    platform_rules: Callable[[], PlatformRules] = default_platform_rules,
++    banned_words: BannedWords = no_banned_words,
++) -> CheckedNode:
++    """The hashtag step as a checked node (step key ``hashtag``), rule checks only."""
++    return make_checked_node(
++        STEP_KEY,
++        make_hashtag_agent(platform_rules, banned_words),
++        make_check_hashtag(platform_rules, banned_words),
++        max_retries,
++    )
+diff --git a/backend/app/agents/post/image.py b/backend/app/agents/post/image.py
+new file mode 100644
+index 0000000..97b11b0
+--- /dev/null
++++ b/backend/app/agents/post/image.py
+@@ -0,0 +1,425 @@
++"""``image``: one picture per platform (AGENT_SPECS 4.2).
++
++Step A (LLM): an image prompt from the final caption. Step B: the image provider
++makes the picture, the storage backend keeps it, and the draft gets a
++``media`` entry ``{"type": "image", "storage_key": ..., "meta": {...}}``. The
++``media_assets`` table does not exist until B3, so key and meta stay in the draft.
++
++``size`` sent to the provider is a **request**: a real model decides the final
++resolution. The rule checks therefore read the stored bytes back and measure the
++real image (valid PNG/JPEG/WebP, size limit, allowed aspect ratio, minimum short
++side). The LLM's aspect ratio is moved to an allowed one *before* an image is paid
++for. Every attempt writes its own object (``image-<attempt>.<ext>``): a re-run of
++the same attempt overwrites it, and a regeneration never overwrites an image that
++an earlier content version still points to.
++"""
++
++import json
++import math
++import re
++from collections.abc import Callable, Mapping, Sequence
++from typing import Any
++
++from pydantic import BaseModel, ConfigDict, Field
++
++from app.agents.checked import (
++    DEFAULT_JUDGE_PASS_THRESHOLD,
++    DEFAULT_MAX_RETRIES,
++    AgentOutput,
++    CheckedNode,
++    CheckResult,
++    Issue,
++    make_checked_node,
++)
++from app.agents.llm import generate_structured
++from app.agents.platform_rules import PlatformRules, default_platform_rules
++from app.agents.post.common import (
++    attempt_number,
++    error,
++    platform_rule,
++    require_strategy,
++    target_platforms,
++    to_json,
++)
++from app.agents.prompts import load_prompt
++from app.agents.state import GraphState
++from app.providers.image import (
++    MAX_DIMENSION,
++    ImageSize,
++    detect_image_mime,
++    get_image_provider,
++    read_image_info,
++)
++from app.storage import StorageNotFoundError, get_storage_backend
++
++STEP_KEY = "image"
++IMAGE_TEMPERATURE = 0.7  # AGENT_SPECS 1.4: image prompt
++DEFAULT_MIN_SHORT_SIDE = 1024  # AGENT_SPECS 4.2: pixels on the short side
++DEFAULT_MAX_IMAGE_BYTES = 8 * 1024 * 1024
++DEFAULT_ASPECT_RATIO = "1:1"
++ASPECT_TOLERANCE = 0.03  # a real model's size may differ a little from the request
++MAX_ALT_TEXT_CHARS = 200
++_RATIO = re.compile(r"\s*(\d{1,3})\s*:\s*(\d{1,3})\s*")
++_EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
++
++IMAGE_RUBRIC = """\
++You judge the image PROMPT, not a picture. Score from 0 to 1 on these points,
++equally weighted:
++1. Relevance: the described picture supports the caption and the content plan.
++2. Brand fit: mood, style and setting suit the brand voice and the platform.
++3. Safety and clarity: it is concrete and visual, asks for no text, letters or
++   logos in the image, shows no real people, and the alt text describes it.
++Report an error issue for a prompt unrelated to the caption, one that asks for
++text or logos in the picture, and one that names real people or brands."""
++
++
++class ImagePrompt(BaseModel):
++    """The image agent's reply for one platform (``AGENT_SPECS.md`` 4.2, step A)."""
++
++    model_config = ConfigDict(str_strip_whitespace=True)
++
++    prompt: str = Field(min_length=1)  # concrete visual description
++    negative_prompt: str | None = None
++    aspect_ratio: str  # moved to an allowed one before generating
++    alt_text: str  # accessibility text, <= 200 chars (rule check)
++    style_notes: str
++
++
++def parse_aspect_ratio(value: Any) -> tuple[int, int] | None:
++    """``"4:5"`` -> ``(4, 5)``; ``None`` if it is not two positive integers."""
++    match = _RATIO.fullmatch(value) if isinstance(value, str) else None
++    if match is None:
++        return None
++    width, height = int(match.group(1)), int(match.group(2))
++    return (width, height) if width > 0 and height > 0 else None
++
++
++def size_for_aspect_ratio(
++    ratio: str, short_side: int = DEFAULT_MIN_SHORT_SIDE
++) -> ImageSize:
++    """The ``(width, height)`` to request for ``ratio``: ``short_side`` pixels on the
++    short side. Raises ``ValueError`` for a bad ratio or a size over the provider's
++    maximum."""
++    parsed = parse_aspect_ratio(ratio)
++    if parsed is None:
++        raise ValueError(f"not an aspect ratio: {ratio!r}")
++    ratio_w, ratio_h = parsed
++    if ratio_w >= ratio_h:
++        size = (round(short_side * ratio_w / ratio_h), short_side)
++    else:
++        size = (short_side, round(short_side * ratio_h / ratio_w))
++    if max(size) > MAX_DIMENSION:
++        raise ValueError(f"aspect ratio {ratio!r} needs more than {MAX_DIMENSION}px")
++    return size
++
++
++def _usable(ratio: str, short_side: int) -> bool:
++    try:
++        size_for_aspect_ratio(ratio, short_side)
++    except ValueError:
++        return False
++    return True
++
++
++def _log_ratio(ratio: str) -> float:
++    width, height = parse_aspect_ratio(ratio) or (1, 1)
++    return math.log(width / height)
++
++
++def choose_aspect_ratio(
++    requested: str, allowed: Sequence[str], short_side: int = DEFAULT_MIN_SHORT_SIDE
++) -> str:
++    """The ratio to request: ``requested`` if the platform allows it, else the
++    allowed ratio nearest to it (the first one if ``requested`` is not a ratio).
++    A platform without ``image_aspect`` rules takes ``requested`` if it is usable,
++    else ``1:1``."""
++    asked = requested.strip()
++    options = [r for r in allowed if _usable(r, short_side)]
++    if not options:
++        return asked if _usable(asked, short_side) else DEFAULT_ASPECT_RATIO
++    if asked in options:
++        return asked
++    if parse_aspect_ratio(asked) is None:
++        return options[0]
++    return min(options, key=lambda r: abs(_log_ratio(r) - _log_ratio(asked)))
++
++
++def _ratio_allowed(width: int, height: int, allowed: Sequence[str]) -> bool:
++    actual = width / height
++    for ratio in allowed:
++        parsed = parse_aspect_ratio(ratio)
++        if parsed is None:
++            continue
++        wanted = parsed[0] / parsed[1]
++        if abs(actual - wanted) / wanted <= ASPECT_TOLERANCE:
++            return True
++    return False
++
++
++def _request_id(state: GraphState) -> str:
++    request_id = state.get("request_id")
++    if not request_id:
++        raise ValueError("the image step needs state['request_id'] for storage keys")
++    return str(request_id)
++
++
++def make_image_agent(
++    platform_rules: Callable[[], PlatformRules] = default_platform_rules,
++    min_short_side: int = DEFAULT_MIN_SHORT_SIDE,
++) -> Callable[[GraphState], AgentOutput]:
++    """Build the agent function; the retry feedback is added by the prompt loader."""
++
++    def image_agent(state: GraphState) -> AgentOutput:
++        template = load_prompt("image")
++        rules = platform_rules()
++        feedback = (state.get("feedback") or {}).get(STEP_KEY)
++        drafts = dict(state.get("drafts") or {})
++        platforms = target_platforms(state)
++        attempt = attempt_number(state, STEP_KEY)
++        request_id = _request_id(state)
++        provider = get_image_provider()
++        storage = get_storage_backend()
++        stored: dict[str, str] = {}
++
++        for platform in platforms:
++            caption = (drafts.get(platform) or {}).get("caption")
++            if not caption:
++                raise ValueError(
++                    f"the image step needs the {platform} caption; run the writer"
++                )
++            allowed = list(platform_rule(rules, platform).get("image_aspect") or [])
++            messages = template.messages(
++                feedback=feedback,
++                platform=platform,
++                aspect_ratios=", ".join(allowed) or "any",
++                language=state["language"],
++                brand_voice=state.get("brand_voice"),
++                caption=caption,
++                strategy=to_json(dict(require_strategy(state, platform))),
++                plan=to_json(state.get("plan")),
++            )
++            reply = generate_structured(
++                ImagePrompt, messages, temperature=IMAGE_TEMPERATURE
++            )
++
++            ratio = choose_aspect_ratio(reply.aspect_ratio, allowed, min_short_side)
++            size = size_for_aspect_ratio(ratio, min_short_side)
++            # The provider has no negative-prompt input, so it goes into the text.
++            text = reply.prompt
++            if reply.negative_prompt:
++                text = f"{text}\n\nAvoid: {reply.negative_prompt}"
++            data = provider.generate(text, size)
++
++            mime = detect_image_mime(data)
++            key = (
++                f"requests/{request_id}/{platform}/"
++                f"image-{attempt}.{_EXTENSIONS.get(mime or '', 'bin')}"
++            )
++            storage.put(key, data, mime or "application/octet-stream")
++            stored[platform] = key
++
++            meta: dict[str, Any] = {
++                "prompt": text,
++                "aspect_ratio": ratio,
++                "alt_text": reply.alt_text,
++                "style_notes": reply.style_notes,
++                "provider": provider.name,
++                "size_bytes": len(data),
++            }
++            info = read_image_info(data)
++            if info is not None:
++                meta.update(mime_type=info.mime, width=info.width, height=info.height)
++            draft = dict(drafts[platform])
++            others = [
++                m
++                for m in draft.get("media") or []
++                if not (isinstance(m, Mapping) and m.get("type") == "image")
++            ]
++            draft["media"] = [
++                *others,
++                {"type": "image", "storage_key": key, "meta": meta},
++            ]
++            drafts[platform] = draft  # type: ignore[assignment]
++
++        return AgentOutput(
++            update={"drafts": drafts},
++            prompt_version=template.version,
++            summary={"platforms": platforms, "storage_keys": stored},
++        )
++
++    return image_agent
++
++
++def _images(draft: Mapping[str, Any]) -> list[Mapping[str, Any]]:
++    media = draft.get("media")
++    if not isinstance(media, list):
++        return []
++    return [m for m in media if isinstance(m, Mapping) and m.get("type") == "image"]
++
++
++def _file_issues(
++    platform: str,
++    data: bytes,
++    allowed: Sequence[str],
++    max_bytes: int,
++    min_short_side: int,
++) -> list[Issue]:
++    info = read_image_info(data)
++    if info is None:
++        return [
++            error(
++                "image_invalid",
++                f"{platform}: the file is not a valid PNG, JPEG or WebP image. "
++                "Describe a simpler, concrete picture.",
++            )
++        ]
++    issues: list[Issue] = []
++    if len(data) > max_bytes:
++        issues.append(
++            error(
++                "image_too_large",
++                f"{platform}: the image is {len(data)} bytes but the limit is "
++                f"{max_bytes}. Describe a simpler picture.",
++            )
++        )
++    if min(info.width, info.height) < min_short_side:
++        issues.append(
++            error(
++                "image_too_small",
++                f"{platform}: the image is {info.width}x{info.height}; the short "
++                f"side must be at least {min_short_side} pixels.",
++            )
++        )
++    if allowed and not _ratio_allowed(info.width, info.height, allowed):
++        issues.append(
++            error(
++                "image_aspect_not_allowed",
++                f"{platform}: the image is {info.width}x{info.height}, which is not "
++                f"one of the allowed ratios ({', '.join(allowed)}).",
++            )
++        )
++    return issues
++
++
++def make_check_image(
++    platform_rules: Callable[[], PlatformRules] = default_platform_rules,
++    max_image_bytes: int = DEFAULT_MAX_IMAGE_BYTES,
++    min_short_side: int = DEFAULT_MIN_SHORT_SIDE,
++) -> Callable[[GraphState], CheckResult]:
++    """Rule checks (AGENT_SPECS 4.2): one stored image per platform that is a valid
++    PNG, JPEG or WebP, under ``max_image_bytes``, at least ``min_short_side`` pixels
++    on the short side, with an allowed aspect ratio; alt text present and at most
++    200 characters. The size and ratio are read from the stored bytes.
++    """
++
++    def check(state: GraphState) -> CheckResult:
++        drafts = state.get("drafts") or {}
++        rules = platform_rules()
++        issues: list[Issue] = []
++        storage = get_storage_backend()
++
++        for platform in target_platforms(state):
++            images = _images(drafts.get(platform) or {})
++            if len(images) != 1:
++                issues.append(
++                    error(
++                        "image_missing",
++                        f"{platform}: create exactly one image, found {len(images)}.",
++                    )
++                )
++                continue
++            item = images[0]
++            alt = (item.get("meta") or {}).get("alt_text")
++            if not isinstance(alt, str) or not alt.strip():
++                issues.append(
++                    error("alt_text_missing", f"{platform}: write the alt text.")
++                )
++            elif len(alt) > MAX_ALT_TEXT_CHARS:
++                issues.append(
++                    error(
++                        "alt_text_too_long",
++                        f"{platform}: the alt text has {len(alt)} characters; "
++                        f"use at most {MAX_ALT_TEXT_CHARS}.",
++                    )
++                )
++            key = item.get("storage_key")
++            try:
++                if not isinstance(key, str):
++                    raise StorageNotFoundError
++                data = storage.get(key)
++            except StorageNotFoundError:
++                issues.append(
++                    error(
++                        "image_missing",
++                        f"{platform}: the stored image was not found; create it again.",
++                    )
++                )
++                continue
++            allowed = platform_rule(rules, platform).get("image_aspect") or []
++            issues += _file_issues(
++                platform, data, allowed, max_image_bytes, min_short_side
++            )
++        return CheckResult.from_issues(issues)
++
++    return check
++
++
++def make_image_judge(
++    platform_rules: Callable[[], PlatformRules] = default_platform_rules,
++) -> Callable[[GraphState], CheckResult]:
++    """Judge of the image prompt against the caption (AGENT_SPECS 4.2: the text-only
++    variant used when no vision model is configured). It only evaluates."""
++
++    def judge(state: GraphState) -> CheckResult:
++        platforms = target_platforms(state)
++        rules = platform_rules()
++        drafts = state.get("drafts") or {}
++        strategy = state.get("strategy") or {}
++        shown: dict[str, Any] = {}
++        for platform in platforms:
++            draft = drafts.get(platform) or {}
++            meta = (_images(draft) or [{}])[0].get("meta") or {}
++            shown[platform] = {
++                "caption": draft.get("caption"),
++                "image_prompt": meta.get("prompt"),
++                "alt_text": meta.get("alt_text"),
++                "style_notes": meta.get("style_notes"),
++            }
++        messages = load_prompt("judge").messages(
++            agent=STEP_KEY,
++            language=state["language"],
++            brand_voice=state.get("brand_voice"),
++            rubric=IMAGE_RUBRIC,
++            platform_rules=to_json(
++                {p: dict(platform_rule(rules, p)) for p in platforms}
++            ),
++            plan=to_json(state.get("plan")),
++            strategy=to_json({p: strategy.get(p) for p in platforms}),
++            output=json.dumps(shown, ensure_ascii=False, sort_keys=True),
++        )
++        return generate_structured(CheckResult, messages, kind="fast", temperature=0.0)
++
++    return judge
++
++
++def make_image_node(
++    *,
++    max_retries: int = DEFAULT_MAX_RETRIES,
++    judge_threshold: float = DEFAULT_JUDGE_PASS_THRESHOLD,
++    use_judge: bool = True,
++    platform_rules: Callable[[], PlatformRules] = default_platform_rules,
++    max_image_bytes: int = DEFAULT_MAX_IMAGE_BYTES,
++    min_short_side: int = DEFAULT_MIN_SHORT_SIDE,
++) -> CheckedNode:
++    """The image step as a checked node (step key ``image``).
++
++    Limits come from ``system_settings``; wire it with ``add_checked_node``.
++    """
++    return make_checked_node(
++        STEP_KEY,
++        make_image_agent(platform_rules, min_short_side),
++        make_check_image(platform_rules, max_image_bytes, min_short_side),
++        max_retries,
++        judge_fn=make_image_judge(platform_rules) if use_judge else None,
++        judge_threshold=judge_threshold,
++    )
+diff --git a/backend/app/agents/post/subgraph.py b/backend/app/agents/post/subgraph.py
+new file mode 100644
+index 0000000..2391ea4
+--- /dev/null
++++ b/backend/app/agents/post/subgraph.py
+@@ -0,0 +1,46 @@
++"""The post subgraph: ``writer -> image -> hashtag`` (``ARCHITECTURE.md`` 6.1).
++
++Each step is a checked node (retry loop and human escalation, section 6.3) that
++handles every distinct target platform in one attempt and writes
++``drafts[platform]``. The compiled graph is meant to be passed to
++``build_graph(post_subgraph=...)``, which uses it as the ``post_subgraph`` node; it
++inherits the parent's checkpointer, so an escalation inside it pauses and resumes
++with the rest of the run.
++
++Re-entry from the reviewer (``rerun_from``, AGENT_SPECS 5.2) is not handled here:
++the three nodes are separate, so B2-11 can wire partial reruns. An aborted
++escalation ends the subgraph with ``status="failed"``.
++"""
++
++from langgraph.graph import END, START, StateGraph
++from langgraph.graph.state import CompiledStateGraph
++
++from app.agents.checked import CheckedNode, add_checked_node
++from app.agents.post.hashtag import make_hashtag_node
++from app.agents.post.image import make_image_node
++from app.agents.post.writer import make_writer_node
++from app.agents.state import GraphState
++
++
++def make_post_subgraph(
++    *,
++    writer: CheckedNode | None = None,
++    image: CheckedNode | None = None,
++    hashtag: CheckedNode | None = None,
++) -> CompiledStateGraph:
++    """Build the subgraph. Each part can be replaced (the worker passes nodes built
++    with the limits from ``system_settings``, B3); the defaults use the builders'
++    own defaults."""
++    builder = StateGraph(GraphState)
++    # Wired from the end backwards: each checked node needs its successor's name.
++    hashtag_entry = add_checked_node(
++        builder, hashtag or make_hashtag_node(), on_pass=END
++    )
++    image_entry = add_checked_node(
++        builder, image or make_image_node(), on_pass=hashtag_entry
++    )
++    writer_entry = add_checked_node(
++        builder, writer or make_writer_node(), on_pass=image_entry
++    )
++    builder.add_edge(START, writer_entry)
++    return builder.compile(name="post_subgraph")
+diff --git a/backend/app/agents/post/writer.py b/backend/app/agents/post/writer.py
+new file mode 100644
+index 0000000..e9d9c7a
+--- /dev/null
++++ b/backend/app/agents/post/writer.py
+@@ -0,0 +1,333 @@
++"""``writer``: the caption (and the YouTube title) per platform (AGENT_SPECS 4.1).
++
++One checked step writes every distinct target platform (FR-5.5: generated once
++per platform and reused for all its accounts). The result goes to
++``drafts[platform]["caption"]`` (and ``["title"]``); other draft fields
++(hashtags, media) are kept, so a reviewer re-entry at the writer does not wipe
++them. ``hook``, ``cta`` and ``language`` are part of the model's reply but are
++not draft fields (``ARCHITECTURE.md`` 6.2), so the rule checks derive what they
++need from the caption and the judge checks the language and the hook.
++"""
++
++import math
++import re
++from collections.abc import Callable, Mapping
++from typing import Any
++
++from pydantic import BaseModel, ConfigDict
++
++from app.agents.checked import (
++    DEFAULT_JUDGE_PASS_THRESHOLD,
++    DEFAULT_MAX_RETRIES,
++    AgentOutput,
++    CheckedNode,
++    CheckResult,
++    Issue,
++    make_checked_node,
++)
++from app.agents.llm import generate_structured
++from app.agents.nodes.validate_input import (
++    BannedWords,
++    contains_banned_word,
++    no_banned_words,
++)
++from app.agents.platform_rules import PlatformRules, default_platform_rules
++from app.agents.post.common import (
++    error,
++    is_number,
++    platform_rule,
++    require_strategy,
++    target_platforms,
++    to_json,
++)
++from app.agents.prompts import load_prompt
++from app.agents.state import GraphState
++
++STEP_KEY = "writer"
++WRITER_TEMPERATURE = 0.8  # AGENT_SPECS 1.4: creative
++LENGTH_TOLERANCE = 0.3  # caption length within +-30% of the strategy's target
++MAX_REFUSAL_CHARS = 200
++DEFAULT_REFUSAL = "the topic cannot be written safely"
++
++WRITER_RUBRIC = """\
++Score from 0 to 1 on these five points, equally weighted:
++1. Hook strength: the first line of every caption makes people want to read on.
++2. Clarity: the text is easy to follow and has no filler.
++3. Tone and language: it follows the brand voice and the strategy, reads natively
++   for its platform and is written in the requested output language (not mixed).
++4. Factual safety: every specific claim, number or source is supported by the
++   research notes below; general statements are fine.
++5. Call to action: it fits the strategy's call to action, if there is one.
++Report an error issue for invented facts, statistics or quotes, misleading or
++sensational claims, text in the wrong language, and a caption that ignores the plan."""
++
++_HASHTAG_IN_TEXT = re.compile(r"(?<![\w&/])#[^\W\d_]")
++_URL = re.compile(r"https?://\S+|\bwww\.\S+", re.IGNORECASE)
++_PLACEHOLDER = re.compile(r"\{\{|\}\}|\{[A-Za-z_]\w*\}|\[[^\]\n]{1,40}\]")
++
++
++class WriterOutput(BaseModel):
++    """The writer's reply for one platform (``AGENT_SPECS.md`` 4.1)."""
++
++    model_config = ConfigDict(str_strip_whitespace=True)
++
++    caption: str  # body text WITHOUT hashtags
++    title: str | None = None  # required for youtube, else None
++    hook: str  # first line (also appears in caption)
++    cta: str | None = None
++    language: str
++    refused: bool = False
++    reason: str | None = None
++
++
++def _clip(text: str, limit: int) -> str:
++    text = text.strip()
++    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
++
++
++def make_writer_agent(
++    platform_rules: Callable[[], PlatformRules] = default_platform_rules,
++    banned_words: BannedWords = no_banned_words,
++) -> Callable[[GraphState], AgentOutput]:
++    """Build the agent function; the retry feedback is added by the prompt loader."""
++
++    def writer_agent(state: GraphState) -> AgentOutput:
++        template = load_prompt("writer")
++        rules = platform_rules()
++        banned = ", ".join(banned_words())
++        feedback = (state.get("feedback") or {}).get(STEP_KEY)
++        drafts = dict(state.get("drafts") or {})
++        platforms = target_platforms(state)
++        languages: dict[str, str] = {}
++
++        for platform in platforms:
++            messages = template.messages(
++                feedback=feedback,
++                platform=platform,
++                language=state["language"],
++                brand_voice=state.get("brand_voice"),
++                banned_words=banned,
++                platform_rules=to_json(dict(platform_rule(rules, platform))),
++                strategy=to_json(dict(require_strategy(state, platform))),
++                plan=to_json(state.get("plan")),
++                research=to_json(state.get("research")),
++            )
++            reply = generate_structured(
++                WriterOutput, messages, temperature=WRITER_TEMPERATURE
++            )
++            if reply.refused:
++                reason = _clip(reply.reason or DEFAULT_REFUSAL, MAX_REFUSAL_CHARS)
++                return AgentOutput(
++                    update={},
++                    prompt_version=template.version,
++                    summary={"platforms": platforms, "refused_platform": platform},
++                    refused_reason=f"{platform}: {reason}",
++                )
++            draft = dict(drafts.get(platform) or {})
++            draft["caption"] = reply.caption
++            if reply.title:
++                draft["title"] = reply.title
++            else:
++                draft.pop("title", None)
++            drafts[platform] = draft  # type: ignore[assignment]
++            languages[platform] = reply.language
++
++        return AgentOutput(
++            update={"drafts": drafts},
++            prompt_version=template.version,
++            summary={
++                "platforms": platforms,
++                "languages": languages,
++                "caption_chars": {p: len(drafts[p]["caption"]) for p in platforms},
++            },
++        )
++
++    return writer_agent
++
++
++def _text_issues(platform: str, caption: str, rule: Mapping[str, Any]) -> list[Issue]:
++    """Mechanical checks on one caption (everything except banned words)."""
++    issues: list[Issue] = []
++    limit = rule.get("caption_max", rule.get("description_max"))
++    if is_number(limit) and len(caption) > limit:
++        issues.append(
++            error(
++                "caption_too_long",
++                f"{platform}: the caption has {len(caption)} characters but the "
++                f"limit is {limit}. Shorten it.",
++            )
++        )
++    if _HASHTAG_IN_TEXT.search(caption):
++        issues.append(
++            error(
++                "hashtag_in_caption",
++                f"{platform}: remove the hashtags from the caption; "
++                "another step adds them.",
++            )
++        )
++    if _URL.search(caption):
++        issues.append(
++            error("raw_url", f"{platform}: remove the web address from the caption.")
++        )
++    if _PLACEHOLDER.search(caption):
++        issues.append(
++            error(
++                "placeholder_left",
++                f"{platform}: replace the unfilled placeholder (like [brand] or "
++                "double curly braces) with real text.",
++            )
++        )
++    return issues
++
++
++def _length_issue(
++    platform: str, caption: str, strategy: Mapping[str, Any]
++) -> list[Issue]:
++    target = strategy.get("length_target")
++    if not is_number(target) or target < 1:
++        return []
++    low = math.ceil(target * (1 - LENGTH_TOLERANCE))
++    high = math.floor(target * (1 + LENGTH_TOLERANCE))
++    if low <= len(caption) <= high:
++        return []
++    direction = "Shorten" if len(caption) > high else "Lengthen"
++    return [
++        error(
++            "caption_off_target",
++            f"{platform}: the caption has {len(caption)} characters; the strategy "
++            f"asks for about {target:g} ({low} to {high}). {direction} it.",
++        )
++    ]
++
++
++def _title_issues(platform: str, title: Any, rule: Mapping[str, Any]) -> list[Issue]:
++    has_title = isinstance(title, str) and bool(title.strip())
++    if platform != "youtube":
++        if has_title:
++            return [
++                error(
++                    "title_not_allowed",
++                    f"{platform}: leave the title empty (null); only YouTube has one.",
++                )
++            ]
++        return []
++    if not has_title:
++        return [error("title_missing", "youtube: write a title.")]
++    limit = rule.get("title_max")
++    if is_number(limit) and len(title) > limit:
++        return [
++            error(
++                "title_too_long",
++                f"youtube: the title has {len(title)} characters but the limit "
++                f"is {limit}. Shorten it.",
++            )
++        ]
++    return []
++
++
++def make_check_writer(
++    platform_rules: Callable[[], PlatformRules] = default_platform_rules,
++    banned_words: BannedWords = no_banned_words,
++) -> Callable[[GraphState], CheckResult]:
++    """Rule checks (AGENT_SPECS 4.1): caption present, within the platform limit and
++    +-30% of ``length_target``, no banned words, no hashtags, raw URLs or
++    placeholders in the body, and a title only (and always) for YouTube.
++
++    The hook is the caption's first line, so a non-empty caption has one. Rules,
++    strategy and banned words are read on every run.
++    """
++
++    def check(state: GraphState) -> CheckResult:
++        drafts = state.get("drafts") or {}
++        strategy = state.get("strategy") or {}
++        rules = platform_rules()
++        banned = banned_words()
++        issues: list[Issue] = []
++
++        for platform in target_platforms(state):
++            draft = drafts.get(platform) or {}
++            rule = platform_rule(rules, platform)
++            caption = draft.get("caption")
++            title = draft.get("title")
++            if not isinstance(caption, str) or not caption.strip():
++                issues.append(error("caption_empty", f"{platform}: write the caption."))
++            else:
++                issues += _text_issues(platform, caption, rule)
++                issues += _length_issue(platform, caption, strategy.get(platform) or {})
++            issues += _title_issues(platform, title, rule)
++            texts = [t for t in (caption, title) if isinstance(t, str)]
++            if contains_banned_word(texts, banned):
++                issues.append(
++                    error(
++                        "banned_word",
++                        f"{platform}: the text uses a banned word. Rewrite it without.",
++                    )
++                )
++        return CheckResult.from_issues(issues)
++
++    return check
++
++
++def make_writer_judge(
++    platform_rules: Callable[[], PlatformRules] = default_platform_rules,
++) -> Callable[[GraphState], CheckResult]:
++    """LLM judge for the captions (rubric: AGENT_SPECS 4.1). It only evaluates.
++
++    The research notes go into the rubric text: they are what claims are judged
++    against, and the shared judge prompt has no input for them.
++    """
++
++    def judge(state: GraphState) -> CheckResult:
++        platforms = target_platforms(state)
++        rules = platform_rules()
++        drafts = state.get("drafts") or {}
++        written = {
++            p: {
++                key: drafts.get(p, {}).get(key)
++                for key in ("caption", "title")
++                if drafts.get(p, {}).get(key)
++            }
++            for p in platforms
++        }
++        strategy = state.get("strategy") or {}
++        rubric = (
++            f"{WRITER_RUBRIC}\n\nResearch notes (the only source of specific "
++            f"facts):\n{to_json(state.get('research'))}"
++        )
++        messages = load_prompt("judge").messages(
++            agent=STEP_KEY,
++            language=state["language"],
++            brand_voice=state.get("brand_voice"),
++            rubric=rubric,
++            platform_rules=to_json(
++                {p: dict(platform_rule(rules, p)) for p in platforms}
++            ),
++            plan=to_json(state.get("plan")),
++            strategy=to_json({p: strategy.get(p) for p in platforms}),
++            output=to_json(written),
++        )
++        return generate_structured(CheckResult, messages, kind="fast", temperature=0.0)
++
++    return judge
++
++
++def make_writer_node(
++    *,
++    max_retries: int = DEFAULT_MAX_RETRIES,
++    judge_threshold: float = DEFAULT_JUDGE_PASS_THRESHOLD,
++    use_judge: bool = True,
++    platform_rules: Callable[[], PlatformRules] = default_platform_rules,
++    banned_words: BannedWords = no_banned_words,
++) -> CheckedNode:
++    """The writer as a checked node (step key ``writer``).
++
++    Limits come from ``system_settings``; wire it with ``add_checked_node``.
++    """
++    return make_checked_node(
++        STEP_KEY,
++        make_writer_agent(platform_rules, banned_words),
++        make_check_writer(platform_rules, banned_words),
++        max_retries,
++        judge_fn=make_writer_judge(platform_rules) if use_judge else None,
++        judge_threshold=judge_threshold,
++    )
+diff --git a/tests/conftest.py b/tests/conftest.py
+index 12ad5ec..2dfe389 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -1,10 +1,12 @@
+ """Shared pytest fixtures."""
+ 
+ from collections.abc import Iterator
++from pathlib import Path
+ 
+ import pytest
+ from app.agents.llm import FakeScript, get_fake_script
+ from app.core.config import get_settings
++from app.providers.image import FakeImage, get_fake_image
+ 
+ 
+ @pytest.fixture
+@@ -27,3 +29,30 @@ def fake_llm(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeScript]:
+     finally:
+         script.reset()
+         get_settings.cache_clear()
++
++
++@pytest.fixture
++def fake_image(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeImage]:
++    """Force the offline image provider and hand out its (clean) shared instance."""
++    monkeypatch.setenv("IMAGE_PROVIDER", "fake")
++    get_settings.cache_clear()
++    provider = get_fake_image()
++    provider.reset()
++    try:
++        yield provider
++    finally:
++        provider.reset()
++        get_settings.cache_clear()
++
++
++@pytest.fixture
++def media_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]:
++    """Point ``get_storage_backend()`` at a fresh local directory."""
++    root = tmp_path / "media"
++    monkeypatch.setenv("STORAGE_BACKEND", "local")
++    monkeypatch.setenv("STORAGE_PATH", str(root))
++    get_settings.cache_clear()
++    try:
++        yield root
++    finally:
++        get_settings.cache_clear()
+diff --git a/tests/unit/test_hashtag_node.py b/tests/unit/test_hashtag_node.py
+new file mode 100644
+index 0000000..24764a4
+--- /dev/null
++++ b/tests/unit/test_hashtag_node.py
+@@ -0,0 +1,478 @@
++"""Tests for the post-flow ``hashtag`` node (B2-10), with the fake LLM provider."""
++
++import json
++import re
++import uuid
++from pathlib import Path
++from typing import Any
++
++import pytest
++from app.agents.checked import StepRecord, add_checked_node
++from app.agents.llm import FakeScript, LLMOutputError
++from app.agents.post.hashtag import (
++    HashtagOutput,
++    make_check_hashtag,
++    make_hashtag_agent,
++    make_hashtag_node,
++)
++from app.agents.prompts import load_prompt
++from app.agents.state import GraphState
++from langgraph.checkpoint.memory import InMemorySaver
++from langgraph.graph import END, START, StateGraph
++from langgraph.types import Command
++from pydantic import ValidationError
++
++ROOT = Path(__file__).resolve().parents[2]
++SPEC = ROOT / "AGENT_SPECS.md"
++PROMPT = ROOT / "backend" / "app" / "agents" / "prompts" / "hashtag.md"
++
++IG_TAGS = ["#greentea", "#tea", "#morningroutine", "#wellness", "#habits"]
++FB_TAGS = ["#greentea", "#tea"]
++
++
++def reply(*tags: str) -> dict[str, Any]:
++    return {"hashtags": list(tags)}
++
++
++def strat(platform: str, **changes: Any) -> dict[str, Any]:
++    data: dict[str, Any] = {
++        "platform": platform,
++        "tone": "warm",
++        "structure": "hook",
++        "length_target": 600,
++        "cta": None,
++        "hashtag_count": 5,
++        "media_notes": "photo",
++        "posting_notes": "morning",
++        "video": None,
++    }
++    data.update(changes)
++    return data
++
++
++def state(**changes: Any) -> GraphState:
++    base: dict[str, Any] = {
++        "request_id": "r1",
++        "workspace_id": "w1",
++        "user_id": "u1",
++        "topic": "Benefits of green tea",
++        "content_type": "post",
++        "target_accounts": [
++            {"account_id": "a1", "platform": "instagram"},
++            {"account_id": "a2", "platform": "facebook"},
++            {"account_id": "a3", "platform": "instagram"},
++        ],
++        "publish_at": "2026-12-01T10:00:00Z",
++        "language": "en",
++        "plan": {"angle": "Tea is a daily habit"},
++        "strategy": {
++            "instagram": strat("instagram", hashtag_count=5),
++            "facebook": strat("facebook", hashtag_count=2),
++        },
++        "drafts": {
++            "instagram": {"caption": "Instagram caption", "media": [{"type": "image"}]},
++            "facebook": {"caption": "Facebook caption"},
++        },
++    }
++    base.update(changes)
++    return base  # type: ignore[return-value]
++
++
++def tagged(instagram: Any = IG_TAGS, facebook: Any = FB_TAGS) -> GraphState:
++    base = state()
++    base["drafts"]["instagram"]["hashtags"] = instagram  # type: ignore[index]
++    base["drafts"]["facebook"]["hashtags"] = facebook  # type: ignore[index]
++    return base
++
++
++# --------------------------------------------------------------------------
++# Model and the spec / prompt contract
++# --------------------------------------------------------------------------
++
++
++def test_model_fields_equal_the_spec() -> None:
++    text = SPEC.read_text(encoding="utf-8")
++    assert "HashtagOutput(hashtags: list[str])" in text
++
++    assert set(HashtagOutput.model_fields) == {"hashtags"}
++
++
++def test_prompt_example_fields_equal_the_model_fields() -> None:
++    text = PROMPT.read_text(encoding="utf-8")
++    example = json.loads(re.search(r"```json\n(.*?)```", text, re.S).group(1))  # type: ignore[union-attr]
++
++    assert set(example) == set(HashtagOutput.model_fields)
++    HashtagOutput.model_validate(example)
++
++
++def test_the_reply_needs_a_list_of_strings_and_trims_each_tag() -> None:
++    assert HashtagOutput.model_validate({"hashtags": [" #a ", "#b"]}).hashtags == [
++        "#a",
++        "#b",
++    ]
++    with pytest.raises(ValidationError):
++        HashtagOutput.model_validate({})
++    with pytest.raises(ValidationError):
++        HashtagOutput.model_validate({"hashtags": "#a"})
++
++
++# --------------------------------------------------------------------------
++# hashtag_agent
++# --------------------------------------------------------------------------
++
++
++def test_the_agent_adds_hashtags_per_distinct_platform_and_keeps_the_rest(
++    fake_llm: FakeScript,
++) -> None:
++    fake_llm.queue(reply(*FB_TAGS), reply(*IG_TAGS))
++
++    result = make_hashtag_agent()(state())
++
++    drafts = result.update["drafts"]
++    assert drafts["facebook"] == {"caption": "Facebook caption", "hashtags": FB_TAGS}
++    assert drafts["instagram"] == {
++        "caption": "Instagram caption",
++        "media": [{"type": "image"}],
++        "hashtags": IG_TAGS,
++    }
++    assert len(fake_llm.calls) == 2  # three accounts, two platforms (FR-5.5)
++    assert all(c.kind == "text" and c.temperature == 0.5 for c in fake_llm.calls)
++    assert result.prompt_version == load_prompt("hashtag").version == "hashtag.v1"
++    assert result.summary == {
++        "platforms": ["facebook", "instagram"],
++        "hashtag_counts": {"facebook": 2, "instagram": 5},
++    }
++
++
++def test_the_prompt_gets_the_caption_count_and_platform_limits(
++    fake_llm: FakeScript,
++) -> None:
++    fake_llm.queue(reply(*FB_TAGS), reply(*IG_TAGS))
++
++    make_hashtag_agent(banned_words=lambda: ["spam"])(state(language="ur"))
++
++    fb, ig = (c.messages[1].content for c in fake_llm.calls)
++    assert "Platform: facebook" in fb and "Platform: instagram" in ig
++    assert "Number of hashtags wanted: 2" in fb and "wanted: 5" in ig
++    assert "Platform minimum: 0" in fb and "Platform maximum: 5" in fb
++    assert "Platform minimum: 3" in ig and "Platform maximum: 15" in ig
++    assert "Facebook caption" in fb and "Instagram caption" not in fb
++    assert "Banned words: spam" in ig and "Output language: ur" in ig
++    assert "Tea is a daily habit" in ig  # plan
++
++
++def test_a_platform_without_hashtag_limits_sends_none(fake_llm: FakeScript) -> None:
++    fake_llm.queue(reply(), reply())
++
++    make_hashtag_agent(lambda: {})(state())
++
++    user = fake_llm.calls[0].messages[1].content
++    assert "Platform minimum: none" in user and "Platform maximum: none" in user
++
++
++def test_retry_feedback_reaches_every_platform_prompt(fake_llm: FakeScript) -> None:
++    fake_llm.queue(reply(), reply())
++
++    make_hashtag_agent()(state(feedback={"hashtag": "Use fewer tags."}))
++
++    for call in fake_llm.calls:
++        assert "Use fewer tags." in call.messages[1].content
++
++
++@pytest.mark.parametrize("caption", [None, ""])
++def test_a_missing_caption_is_a_bug_not_a_retry(
++    fake_llm: FakeScript, caption: str | None
++) -> None:
++    base = state()
++    base["drafts"]["facebook"]["caption"] = caption  # type: ignore[index]
++
++    with pytest.raises(ValueError, match="facebook caption"):
++        make_hashtag_agent()(base)
++    assert fake_llm.calls == []
++
++
++def test_a_missing_strategy_is_a_bug_not_a_retry(fake_llm: FakeScript) -> None:
++    base = state(strategy={"instagram": strat("instagram")})
++
++    with pytest.raises(ValueError, match="facebook"):
++        make_hashtag_agent()(base)
++
++
++def test_an_invalid_reply_raises_an_output_error(fake_llm: FakeScript) -> None:
++    fake_llm.queue({"tags": []}, "nonsense")
++
++    with pytest.raises(LLMOutputError):
++        make_hashtag_agent()(state())
++
++
++# --------------------------------------------------------------------------
++# Rule checks
++# --------------------------------------------------------------------------
++
++
++def codes(result: Any) -> list[str]:
++    return [i.code for i in result.issues]
++
++
++def test_good_hashtags_pass() -> None:
++    assert make_check_hashtag()(tagged()).ok is True
++
++
++def test_missing_hashtags_fail() -> None:
++    result = make_check_hashtag()(state())
++
++    assert codes(result) == ["hashtags_missing", "hashtags_missing"]
++    assert "instagram: add the hashtags." in result.feedback
++
++
++def test_hashtags_that_are_not_a_list_fail() -> None:
++    result = make_check_hashtag()(tagged(instagram="#a #b #c"))
++
++    assert codes(result) == ["hashtags_missing"]
++
++
++@pytest.mark.parametrize(
++    ("count", "ok"), [(2, False), (3, True), (15, True), (16, False)]
++)
++def test_the_instagram_range_is_three_to_fifteen(count: int, ok: bool) -> None:
++    tags = [f"#tag{i}" for i in range(count)]
++
++    result = make_check_hashtag()(tagged(instagram=tags))
++
++    assert result.ok is ok
++    if not ok:
++        assert codes(result) == ["hashtag_count_range"]
++        assert f"not {count}" in result.feedback
++
++
++def test_zero_hashtags_are_fine_for_facebook() -> None:
++    assert make_check_hashtag()(tagged(facebook=[])).ok is True
++
++
++def test_facebook_allows_at_most_five() -> None:
++    result = make_check_hashtag()(tagged(facebook=[f"#t{i}" for i in range(6)]))
++
++    assert codes(result) == ["hashtag_count_range"]
++    assert "between 0 and 5" in result.feedback
++
++
++def test_a_platform_without_limits_accepts_any_count() -> None:
++    check = make_check_hashtag(lambda: {})
++
++    assert check(tagged(instagram=[], facebook=[f"#t{i}" for i in range(40)])).ok
++
++
++def test_a_platform_with_only_a_minimum_or_maximum() -> None:
++    only_min = make_check_hashtag(lambda: {"instagram": {"hashtags_min": 2}})
++    only_max = make_check_hashtag(lambda: {"instagram": {"hashtags_max": 2}})
++
++    assert only_min(tagged(instagram=["#a"])).ok is False
++    assert (
++        "between 2 and the platform maximum"
++        in only_min(tagged(instagram=["#a"])).feedback
++    )
++    assert only_min(tagged(instagram=["#a", "#b", "#c"])).ok is True
++    assert "between 0 and 2" in only_max(tagged(instagram=["#a", "#c", "#d"])).feedback
++
++
++@pytest.mark.parametrize(
++    "tag",
++    [
++        "tea",
++        "#",
++        "# tea",
++        "#tea time",
++        "#tea!",
++        "#tea-time",
++        "#tea.",
++        "##tea",
++        "",
++        5,
++        None,
++    ],
++)
++def test_malformed_hashtags_fail(tag: Any) -> None:
++    result = make_check_hashtag()(tagged(facebook=["#ok", tag]))
++
++    assert codes(result) == ["hashtag_invalid"]
++    assert "start with #" in result.feedback
++
++
++@pytest.mark.parametrize("tag", ["#tea", "#Tea_Time", "#چائے", "#té", "#2026", "#a1"])
++def test_letters_digits_and_underscores_in_any_script_are_fine(tag: str) -> None:
++    assert make_check_hashtag()(tagged(facebook=["#ok", tag])).ok is True
++
++
++@pytest.mark.parametrize(("size", "ok"), [(40, True), (41, False)])
++def test_a_hashtag_has_at_most_forty_characters_including_the_hash(
++    size: int, ok: bool
++) -> None:
++    tag = "#" + "a" * (size - 1)
++
++    result = make_check_hashtag()(tagged(facebook=["#ok", tag]))
++
++    assert result.ok is ok
++    if not ok:
++        assert codes(result) == ["hashtag_too_long"]
++
++
++def test_duplicates_are_found_ignoring_case() -> None:
++    result = make_check_hashtag()(tagged(facebook=["#Tea", "#tea"]))
++
++    assert codes(result) == ["hashtag_duplicate"]
++    assert "#tea" in result.feedback
++
++
++def test_long_lists_of_bad_tags_name_only_a_few() -> None:
++    tags = [f"bad{i}" for i in range(9)]
++
++    result = make_check_hashtag()(tagged(facebook=tags[:5]))
++    many = make_check_hashtag(lambda: {})(tagged(facebook=tags))
++
++    assert "..." not in result.feedback
++    assert "bad0, bad1, bad2, bad3, bad4, ..." in many.feedback
++    assert "bad5" not in many.feedback
++
++
++def test_a_banned_word_as_a_hashtag_fails_without_naming_it() -> None:
++    result = make_check_hashtag(banned_words=lambda: ["spam"])(
++        tagged(facebook=["#ok", "#spam"])
++    )
++
++    assert codes(result) == ["banned_word"]
++    assert "spam" not in result.feedback
++
++
++def test_a_banned_word_inside_a_longer_tag_is_not_a_whole_word() -> None:
++    result = make_check_hashtag(banned_words=lambda: ["spam"])(
++        tagged(facebook=["#ok", "#spammer"])
++    )
++
++    assert result.ok is True
++
++
++def test_every_problem_is_reported_in_one_feedback() -> None:
++    result = make_check_hashtag()(tagged(instagram=["#a", "#A"], facebook=["x"]))
++
++    assert set(codes(result)) == {
++        "hashtag_duplicate",
++        "hashtag_count_range",
++        "hashtag_invalid",
++    }
++
++
++def test_the_rules_are_read_on_every_run() -> None:
++    rules = {"instagram": {"hashtags_max": 10}}
++    check = make_check_hashtag(lambda: rules)
++    base = tagged(facebook=[])
++
++    assert check(base).ok is True
++    rules["instagram"]["hashtags_max"] = 2
++    assert codes(check(base)) == ["hashtag_count_range"]
++
++
++def test_the_rules_do_not_call_the_llm(fake_llm: FakeScript) -> None:
++    make_check_hashtag()(tagged())
++
++    assert fake_llm.calls == []
++
++
++# --------------------------------------------------------------------------
++# The checked node (rule-only: no judge)
++# --------------------------------------------------------------------------
++
++
++class Flow:
++    def __init__(self, **node_args: Any) -> None:
++        self.steps: list[StepRecord] = []
++        self.node = make_hashtag_node(**node_args)
++        builder = StateGraph(GraphState)
++        entry = add_checked_node(builder, self.node, on_pass=END)
++        builder.add_edge(START, entry)
++        self.graph = builder.compile(checkpointer=InMemorySaver())
++        self.config = {
++            "configurable": {
++                "thread_id": str(uuid.uuid4()),
++                "step_recorder": self.steps.append,
++            }
++        }
++
++    def run(self, initial: GraphState | None = None) -> dict[str, Any]:
++        return self.graph.invoke(initial or state(), self.config)
++
++    def resume(self, value: Any) -> dict[str, Any]:
++        return self.graph.invoke(Command(resume=value), self.config)
++
++
++def test_good_hashtags_pass_at_once_and_there_is_no_judge_call(
++    fake_llm: FakeScript,
++) -> None:
++    fake_llm.queue(reply(*FB_TAGS), reply(*IG_TAGS))
++    flow = Flow()
++
++    result = flow.run()
++
++    assert result["drafts"]["instagram"]["hashtags"] == IG_TAGS
++    assert [c.kind for c in fake_llm.calls] == ["text", "text"]
++    (step,) = flow.steps
++    assert (step.node_name, step.attempt, step.verdict) == ("hashtag", 1, "passed")
++    assert step.output_summary["prompt_version"] == "hashtag.v1"
++    assert step.output_summary["score"] is None
++
++
++def test_a_rule_failure_retries_with_feedback_that_changes_the_second_attempt(
++    fake_llm: FakeScript,
++) -> None:
++    fake_llm.queue(
++        reply(*FB_TAGS),
++        reply("#a", "#A"),  # attempt 1: instagram has a duplicate
++        reply(*FB_TAGS),
++        reply(*IG_TAGS),  # attempt 2
++    )
++    flow = Flow()
++
++    result = flow.run()
++
++    second = fake_llm.calls[3].messages[1].content
++    assert "Previous attempt feedback" not in fake_llm.calls[1].messages[1].content
++    assert "instagram: remove the repeated hashtags" in second
++    assert "instagram: give between 3 and 15" in second
++    assert result["drafts"]["instagram"]["hashtags"] == IG_TAGS
++    assert [s.verdict for s in flow.steps] == ["retried", "passed"]
++
++
++def test_exhausted_retries_escalate_and_resume_retry_continues(
++    fake_llm: FakeScript,
++) -> None:
++    bad = reply("nope")
++    fake_llm.queue(*[bad] * 6, reply(*FB_TAGS), reply(*IG_TAGS))
++    flow = Flow()
++
++    paused = flow.run()
++
++    (interrupt,) = paused["__interrupt__"]
++    assert interrupt.value["step"] == "hashtag"
++    assert interrupt.value["reason"] == "retries_exhausted"
++
++    done = flow.resume({"action": "retry"})
++
++    assert done["drafts"]["facebook"]["hashtags"] == FB_TAGS
++
++
++def test_the_banned_words_hook_reaches_prompt_and_check(fake_llm: FakeScript) -> None:
++    fake_llm.queue(reply("#ok", "#spam"), reply(*IG_TAGS))
++    flow = Flow(banned_words=lambda: ["spam"], max_retries=1)
++
++    paused = flow.run()
++
++    assert "Banned words: spam" in fake_llm.calls[0].messages[1].content
++    assert {i["code"] for i in paused["__interrupt__"][0].value["issues"]} == {
++        "banned_word"
++    }
++
++
++def test_the_node_uses_the_documented_step_key_and_default_limits() -> None:
++    node = make_hashtag_node()
++
++    assert node.key == "hashtag"
++    assert node.max_retries == 3
+diff --git a/tests/unit/test_image_node.py b/tests/unit/test_image_node.py
+new file mode 100644
+index 0000000..bfaba4f
+--- /dev/null
++++ b/tests/unit/test_image_node.py
+@@ -0,0 +1,945 @@
++"""Tests for the post-flow ``image`` node (B2-10): fake LLM, fake image provider
++and a local storage directory. Nothing touches the network."""
++
++import json
++import re
++import uuid
++from pathlib import Path
++from typing import Any
++
++import pytest
++from app.agents.checked import StepRecord, add_checked_node
++from app.agents.llm import FakeScript, LLMOutputError
++from app.agents.post.image import (
++    DEFAULT_MAX_IMAGE_BYTES,
++    IMAGE_RUBRIC,
++    ImagePrompt,
++    choose_aspect_ratio,
++    make_check_image,
++    make_image_agent,
++    make_image_judge,
++    make_image_node,
++    parse_aspect_ratio,
++    size_for_aspect_ratio,
++)
++from app.agents.prompts import load_prompt
++from app.agents.state import GraphState
++from app.providers.image import (
++    FakeImage,
++    ImageConfigError,
++    ImageProviderError,
++    build_png,
++    read_image_info,
++)
++from app.storage import StorageConfigError, get_storage_backend
++from langgraph.checkpoint.memory import InMemorySaver
++from langgraph.graph import END, START, StateGraph
++from langgraph.types import Command
++from pydantic import ValidationError
++
++ROOT = Path(__file__).resolve().parents[2]
++SPEC = ROOT / "AGENT_SPECS.md"
++PROMPT = ROOT / "backend" / "app" / "agents" / "prompts" / "image.md"
++
++pytestmark = pytest.mark.usefixtures("media_root", "fake_image")
++
++
++def prompt_reply(**changes: Any) -> dict[str, Any]:
++    data: dict[str, Any] = {
++        "prompt": "A steaming cup of green tea on a wooden table, soft morning light",
++        "negative_prompt": None,
++        "aspect_ratio": "4:5",
++        "alt_text": "A cup of green tea on a table",
++        "style_notes": "warm greens, calm mood",
++    }
++    data.update(changes)
++    return data
++
++
++def good_judge(score: float = 0.9) -> dict[str, Any]:
++    return {"ok": True, "score": score, "issues": [], "feedback": ""}
++
++
++def strat(platform: str) -> dict[str, Any]:
++    return {
++        "platform": platform,
++        "tone": "warm",
++        "structure": "hook",
++        "length_target": 600,
++        "cta": None,
++        "hashtag_count": 3,
++        "media_notes": "bright photo of tea",
++        "posting_notes": "morning",
++        "video": None,
++    }
++
++
++def state(**changes: Any) -> GraphState:
++    base: dict[str, Any] = {
++        "request_id": "r1",
++        "workspace_id": "w1",
++        "user_id": "u1",
++        "topic": "Benefits of green tea",
++        "content_type": "post",
++        "target_accounts": [
++            {"account_id": "a1", "platform": "instagram"},
++            {"account_id": "a2", "platform": "facebook"},
++            {"account_id": "a3", "platform": "instagram"},
++        ],
++        "publish_at": "2026-12-01T10:00:00Z",
++        "brand_voice": "warm and simple",
++        "language": "en",
++        "plan": {"angle": "Tea is a daily habit"},
++        "strategy": {"instagram": strat("instagram"), "facebook": strat("facebook")},
++        "drafts": {
++            "instagram": {"caption": "Instagram caption", "hashtags": ["#tea"]},
++            "facebook": {"caption": "Facebook caption"},
++        },
++    }
++    base.update(changes)
++    return base  # type: ignore[return-value]
++
++
++def store(key: str, data: bytes, mime: str = "image/png") -> str:
++    get_storage_backend().put(key, data, mime)
++    return key
++
++
++def with_image(
++    platform: str, data: bytes, *, key: str | None = None, **meta: Any
++) -> dict[str, Any]:
++    """A media entry whose bytes are already in storage."""
++    key = store(key or f"requests/r1/{platform}/image-1.png", data)
++    entry = {"alt_text": "A cup of tea", "prompt": "a cup of tea", **meta}
++    return {"type": "image", "storage_key": key, "meta": entry}
++
++
++def imaged(instagram: bytes | None = None, facebook: bytes | None = None) -> GraphState:
++    """A state whose drafts hold valid stored images (Instagram 4:5, Facebook 1:1)."""
++    base = state()
++    drafts = base["drafts"]  # type: ignore[typeddict-item]
++    drafts["instagram"]["media"] = [
++        with_image("instagram", instagram or build_png(1024, 1280, (1, 2, 3)))
++    ]
++    drafts["facebook"]["media"] = [
++        with_image("facebook", facebook or build_png(1024, 1024, (1, 2, 3)))
++    ]
++    return base
++
++
++def codes(result: Any) -> list[str]:
++    return [i.code for i in result.issues]
++
++
++# --------------------------------------------------------------------------
++# Aspect-ratio helpers
++# --------------------------------------------------------------------------
++
++
++@pytest.mark.parametrize(
++    ("value", "expected"),
++    [
++        ("4:5", (4, 5)),
++        (" 16 : 9 ", (16, 9)),
++        ("1:1", (1, 1)),
++        ("21:9", (21, 9)),
++        ("0:1", None),
++        ("1:0", None),
++        ("wide", None),
++        ("4x5", None),
++        ("4:5:6", None),
++        ("-4:5", None),
++        ("1000:1", None),
++        ("", None),
++        (None, None),
++        (1.5, None),
++    ],
++)
++def test_parse_aspect_ratio(value: Any, expected: Any) -> None:
++    assert parse_aspect_ratio(value) == expected
++
++
++@pytest.mark.parametrize(
++    ("ratio", "size"),
++    [
++        ("1:1", (1024, 1024)),
++        ("4:5", (1024, 1280)),
++        ("5:4", (1280, 1024)),
++        ("16:9", (1820, 1024)),
++        ("9:16", (1024, 1820)),
++        ("2:2", (1024, 1024)),
++    ],
++)
++def test_size_has_1024_on_the_short_side(ratio: str, size: tuple[int, int]) -> None:
++    assert size_for_aspect_ratio(ratio) == size
++
++
++def test_the_short_side_is_a_parameter() -> None:
++    assert size_for_aspect_ratio("4:5", 512) == (512, 640)
++
++
++@pytest.mark.parametrize("ratio", ["wide", "0:5", "", "5:1"])
++def test_a_bad_or_too_large_ratio_is_a_value_error(ratio: str) -> None:
++    with pytest.raises(ValueError):
++        size_for_aspect_ratio(ratio)
++
++
++def test_a_ratio_that_needs_more_than_the_provider_maximum_is_refused() -> None:
++    assert size_for_aspect_ratio("4:1") == (4096, 1024)
++    with pytest.raises(ValueError, match="4096"):
++        size_for_aspect_ratio("41:10")
++
++
++@pytest.mark.parametrize(
++    ("requested", "allowed", "expected"),
++    [
++        ("4:5", ["1:1", "4:5"], "4:5"),
++        (" 4:5 ", ["1:1", "4:5"], "4:5"),
++        ("16:9", ["1:1", "4:5"], "1:1"),  # nearest on a log scale
++        ("9:16", ["1:1", "4:5"], "4:5"),
++        ("2:2", ["4:5", "1:1"], "1:1"),  # same ratio written differently
++        ("wide", ["1:1", "4:5"], "1:1"),  # not a ratio: the first allowed
++        ("", ["4:5", "1:1"], "4:5"),
++        ("7:9", ["bad", "1:1", "4:5"], "4:5"),  # unusable entries are ignored
++    ],
++)
++def test_the_requested_ratio_is_moved_to_an_allowed_one(
++    requested: str, allowed: list[str], expected: str
++) -> None:
++    assert choose_aspect_ratio(requested, allowed) == expected
++
++
++@pytest.mark.parametrize(
++    ("requested", "allowed", "expected"),
++    [
++        ("16:9", [], "16:9"),  # no rules: the model's choice
++        ("wide", [], "1:1"),  # unusable: the default
++        ("41:10", [], "1:1"),  # over the provider maximum
++        ("4:5", ["bad", "worse"], "4:5"),  # no usable allowed ratio
++    ],
++)
++def test_without_usable_rules_the_request_or_the_default_is_used(
++    requested: str, allowed: list[Any], expected: str
++) -> None:
++    assert choose_aspect_ratio(requested, allowed) == expected
++
++
++# --------------------------------------------------------------------------
++# Model and the spec / prompt contract
++# --------------------------------------------------------------------------
++
++
++def test_model_fields_equal_the_spec_class() -> None:
++    text = SPEC.read_text(encoding="utf-8")
++    block = re.search(r"class ImagePrompt\(BaseModel\):\n(.*?)\n```", text, re.S)
++    assert block
++    spec = set(re.findall(r"^    (\w+):", block.group(1), re.M))
++
++    assert set(ImagePrompt.model_fields) == spec
++
++
++def test_prompt_example_fields_equal_the_model_fields() -> None:
++    text = PROMPT.read_text(encoding="utf-8")
++    example = json.loads(re.search(r"```json\n(.*?)```", text, re.S).group(1))  # type: ignore[union-attr]
++
++    assert set(example) == set(ImagePrompt.model_fields)
++    ImagePrompt.model_validate(example)
++
++
++def test_a_full_reply_round_trips_and_the_negative_prompt_is_optional() -> None:
++    assert ImagePrompt.model_validate(prompt_reply()).model_dump() == prompt_reply()
++    data = prompt_reply()
++    del data["negative_prompt"]
++
++    assert ImagePrompt.model_validate(data).negative_prompt is None
++
++
++@pytest.mark.parametrize("field", ["prompt", "aspect_ratio", "alt_text", "style_notes"])
++def test_the_core_fields_are_required(field: str) -> None:
++    data = prompt_reply()
++    del data[field]
++
++    with pytest.raises(ValidationError):
++        ImagePrompt.model_validate(data)
++
++
++@pytest.mark.parametrize("prompt", ["", "   \n"])
++def test_a_blank_prompt_is_a_schema_error_so_the_reply_is_repaired(
++    prompt: str,
++) -> None:
++    with pytest.raises(ValidationError):
++        ImagePrompt.model_validate(prompt_reply(prompt=prompt))
++
++
++def test_the_alt_text_limit_is_a_rule_check_not_a_schema_error() -> None:
++    assert (
++        len(ImagePrompt.model_validate(prompt_reply(alt_text="a" * 999)).alt_text)
++        == 999
++    )
++
++
++# --------------------------------------------------------------------------
++# image_agent
++# --------------------------------------------------------------------------
++
++
++def test_the_agent_makes_stores_and_records_one_image_per_distinct_platform(
++    fake_llm: FakeScript, fake_image: FakeImage
++) -> None:
++    fake_llm.queue(prompt_reply(aspect_ratio="1:1"), prompt_reply(aspect_ratio="4:5"))
++
++    result = make_image_agent()(state())
++
++    # Three accounts, two platforms: two prompts and two images (FR-5.5).
++    assert len(fake_llm.calls) == 2 and len(fake_image.calls) == 2
++    assert [size for _, size in fake_image.calls] == [(1024, 1024), (1024, 1280)]
++    assert all(c.kind == "text" and c.temperature == 0.7 for c in fake_llm.calls)
++    drafts = result.update["drafts"]
++    storage = get_storage_backend()
++    for platform, size in (("facebook", (1024, 1024)), ("instagram", (1024, 1280))):
++        (media,) = drafts[platform]["media"]
++        assert media["type"] == "image"
++        assert media["storage_key"] == f"requests/r1/{platform}/image-1.png"
++        info = read_image_info(storage.get(media["storage_key"]))
++        assert (info.width, info.height) == size  # type: ignore[union-attr]
++    assert drafts["instagram"]["caption"] == "Instagram caption"  # kept
++    assert drafts["instagram"]["hashtags"] == ["#tea"]
++    assert result.prompt_version == load_prompt("image").version == "image.v1"
++    assert result.summary == {
++        "platforms": ["facebook", "instagram"],
++        "storage_keys": {
++            "facebook": "requests/r1/facebook/image-1.png",
++            "instagram": "requests/r1/instagram/image-1.png",
++        },
++    }
++
++
++def test_the_media_meta_describes_the_image_and_how_it_was_made(
++    fake_llm: FakeScript,
++) -> None:
++    fake_llm.queue(prompt_reply(), prompt_reply())
++
++    drafts = make_image_agent()(state()).update["drafts"]
++
++    meta = drafts["instagram"]["media"][0]["meta"]
++    assert meta == {
++        "prompt": prompt_reply()["prompt"],
++        "aspect_ratio": "4:5",
++        "alt_text": "A cup of green tea on a table",
++        "style_notes": "warm greens, calm mood",
++        "provider": "fake",
++        "size_bytes": meta["size_bytes"],
++        "mime_type": "image/png",
++        "width": 1024,
++        "height": 1280,
++    }
++    assert meta["size_bytes"] > 0
++
++
++def test_the_negative_prompt_is_appended_to_the_text_sent_to_the_provider(
++    fake_llm: FakeScript, fake_image: FakeImage
++) -> None:
++    fake_llm.queue(
++        prompt_reply(negative_prompt="text, logos"), prompt_reply(negative_prompt=None)
++    )
++
++    drafts = make_image_agent()(state()).update["drafts"]
++
++    sent = [prompt for prompt, _ in fake_image.calls]
++    assert sent[0].endswith("\n\nAvoid: text, logos")
++    assert "Avoid" not in sent[1]
++    assert drafts["facebook"]["media"][0]["meta"]["prompt"] == sent[0]
++
++
++def test_the_prompt_gets_the_caption_ratios_and_strategy_of_its_platform(
++    fake_llm: FakeScript,
++) -> None:
++    fake_llm.queue(prompt_reply(), prompt_reply())
++
++    make_image_agent()(state(language="ur", brand_voice="playful pirate"))
++
++    fb, ig = (c.messages[1].content for c in fake_llm.calls)
++    assert "Platform: facebook" in fb and "Platform: instagram" in ig
++    assert "Allowed aspect ratios: 1:1, 4:5, 16:9" in fb
++    assert "Allowed aspect ratios: 1:1, 4:5\n" in ig
++    assert "Facebook caption" in fb and "Instagram caption" not in fb
++    assert "Output language for the alt text: ur" in ig
++    assert "Brand voice: playful pirate" in ig
++    assert "bright photo of tea" in ig  # strategy media notes
++    assert "Tea is a daily habit" in ig  # plan
++
++
++def test_a_platform_without_aspect_rules_is_told_any_ratio_is_fine(
++    fake_llm: FakeScript, fake_image: FakeImage
++) -> None:
++    fake_llm.queue(prompt_reply(aspect_ratio="16:9"), prompt_reply(aspect_ratio="9:16"))
++
++    make_image_agent(lambda: {})(state())
++
++    assert "Allowed aspect ratios: any" in fake_llm.calls[0].messages[1].content
++    assert [size for _, size in fake_image.calls] == [(1820, 1024), (1024, 1820)]
++
++
++def test_a_ratio_the_platform_does_not_allow_is_moved_before_paying_for_the_image(
++    fake_llm: FakeScript, fake_image: FakeImage
++) -> None:
++    fake_llm.queue(prompt_reply(aspect_ratio="16:9"), prompt_reply(aspect_ratio="16:9"))
++
++    drafts = make_image_agent()(state()).update["drafts"]
++
++    # Facebook allows 16:9; Instagram only 1:1 and 4:5 (nearest to 16:9: 1:1).
++    assert [size for _, size in fake_image.calls] == [(1820, 1024), (1024, 1024)]
++    assert drafts["instagram"]["media"][0]["meta"]["aspect_ratio"] == "1:1"
++
++
++def test_the_requested_short_side_is_a_parameter(
++    fake_llm: FakeScript, fake_image: FakeImage
++) -> None:
++    fake_llm.queue(prompt_reply(aspect_ratio="1:1"), prompt_reply(aspect_ratio="1:1"))
++
++    make_image_agent(min_short_side=2048)(state())
++
++    assert [size for _, size in fake_image.calls] == [(2048, 2048)] * 2
++
++
++def test_the_attempt_number_is_part_of_the_storage_key(fake_llm: FakeScript) -> None:
++    fake_llm.queue(prompt_reply(), prompt_reply())
++    base = state(attempt_info={"image": {"attempt": 2}})
++
++    drafts = make_image_agent()(base).update["drafts"]
++
++    assert drafts["instagram"]["media"][0]["storage_key"].endswith("/image-3.png")
++
++
++def test_a_new_attempt_never_overwrites_an_earlier_image(
++    fake_llm: FakeScript, fake_image: FakeImage
++) -> None:
++    fake_llm.queue(*[prompt_reply()] * 4)
++    agent = make_image_agent()
++
++    first = agent(state()).update["drafts"]
++    second = agent(state(attempt_info={"image": {"attempt": 1}})).update["drafts"]
++
++    old = first["instagram"]["media"][0]["storage_key"]
++    new = second["instagram"]["media"][0]["storage_key"]
++    assert old != new
++    assert get_storage_backend().get(old) and get_storage_backend().get(new)
++
++
++def test_running_the_same_attempt_again_overwrites_its_own_object(
++    fake_llm: FakeScript, media_root: Path
++) -> None:
++    fake_llm.queue(*[prompt_reply()] * 4)
++    agent = make_image_agent()
++
++    agent(state())
++    agent(state())
++
++    files = sorted(p.name for p in media_root.rglob("*") if p.is_file())
++    assert files == ["image-1.png", "image-1.png"]  # one per platform, not four
++
++
++def test_the_new_image_replaces_the_old_image_entry_only(fake_llm: FakeScript) -> None:
++    fake_llm.queue(prompt_reply(), prompt_reply())
++    base = state()
++    base["drafts"]["instagram"]["media"] = [  # type: ignore[index]
++        {"type": "image", "storage_key": "old"},
++        {"type": "audio", "storage_key": "keep"},
++        "not a dict",
++    ]
++
++    media = make_image_agent()(base).update["drafts"]["instagram"]["media"]
++
++    assert media[:2] == [{"type": "audio", "storage_key": "keep"}, "not a dict"]
++    assert media[2]["type"] == "image"
++
++
++def test_an_image_that_is_not_an_image_is_stored_but_has_no_size(
++    fake_llm: FakeScript, fake_image: FakeImage
++) -> None:
++    fake_image.queue(b"not an image", b"also not")
++    fake_llm.queue(prompt_reply(), prompt_reply())
++
++    drafts = make_image_agent()(state()).update["drafts"]
++
++    media = drafts["facebook"]["media"][0]
++    assert media["storage_key"] == "requests/r1/facebook/image-1.bin"
++    assert get_storage_backend().get(media["storage_key"]) == b"not an image"
++    assert "width" not in media["meta"] and "mime_type" not in media["meta"]
++
++
++@pytest.mark.parametrize("caption", [None, ""])
++def test_a_missing_caption_is_a_bug_not_a_retry(
++    fake_llm: FakeScript, caption: str | None
++) -> None:
++    base = state()
++    base["drafts"]["facebook"]["caption"] = caption  # type: ignore[index]
++
++    with pytest.raises(ValueError, match="facebook caption"):
++        make_image_agent()(base)
++    assert fake_llm.calls == []
++
++
++@pytest.mark.parametrize("request_id", [None, ""])
++def test_a_missing_request_id_is_a_bug(fake_llm: FakeScript, request_id: Any) -> None:
++    base = state(request_id=request_id)
++
++    with pytest.raises(ValueError, match="request_id"):
++        make_image_agent()(base)
++
++
++def test_a_missing_strategy_is_a_bug_not_a_retry(fake_llm: FakeScript) -> None:
++    base = state(strategy={"instagram": strat("instagram")})
++    fake_llm.queue(prompt_reply())
++
++    with pytest.raises(ValueError, match="facebook"):
++        make_image_agent()(base)
++
++
++def test_provider_errors_propagate_for_the_checked_node_to_handle(
++    fake_llm: FakeScript, fake_image: FakeImage
++) -> None:
++    fake_image.fail_next(1)
++    fake_llm.queue(prompt_reply(), prompt_reply())
++
++    with pytest.raises(ImageProviderError):
++        make_image_agent()(state())
++
++
++def test_an_invalid_reply_raises_an_output_error(fake_llm: FakeScript) -> None:
++    fake_llm.queue({"prompt": ""}, "nonsense")
++
++    with pytest.raises(LLMOutputError):
++        make_image_agent()(state())
++
++
++def test_a_storage_configuration_error_propagates(
++    fake_llm: FakeScript, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    from app.core.config import get_settings
++
++    monkeypatch.setenv("STORAGE_BACKEND", "nowhere")
++    get_settings.cache_clear()
++
++    with pytest.raises(StorageConfigError):
++        make_image_agent()(state())
++
++
++def test_retry_feedback_reaches_every_platform_prompt(fake_llm: FakeScript) -> None:
++    fake_llm.queue(prompt_reply(), prompt_reply())
++
++    make_image_agent()(state(feedback={"image": "Make it simpler."}))
++
++    for call in fake_llm.calls:
++        assert "Make it simpler." in call.messages[1].content
++
++
++# --------------------------------------------------------------------------
++# Rule checks (they read the stored bytes)
++# --------------------------------------------------------------------------
++
++
++def test_good_images_pass() -> None:
++    assert make_check_image()(imaged()).ok is True
++
++
++def test_no_media_fails() -> None:
++    result = make_check_image()(state())
++
++    assert codes(result) == ["image_missing", "image_missing"]
++    assert "instagram: create exactly one image, found 0." in result.feedback
++
++
++def test_two_images_fail() -> None:
++    base = imaged()
++    media = base["drafts"]["instagram"]["media"]  # type: ignore[index]
++    media.append(media[0])
++
++    result = make_check_image()(base)
++
++    assert codes(result) == ["image_missing"]
++    assert "found 2" in result.feedback
++
++
++def test_media_that_is_not_an_image_entry_does_not_count() -> None:
++    base = imaged()
++    base["drafts"]["facebook"]["media"] = [{"type": "audio"}, "x"]  # type: ignore[index]
++
++    assert codes(make_check_image()(base)) == ["image_missing"]
++
++
++def test_media_that_is_not_a_list_fails() -> None:
++    base = imaged()
++    base["drafts"]["facebook"]["media"] = "image.png"  # type: ignore[index]
++
++    assert codes(make_check_image()(base)) == ["image_missing"]
++
++
++@pytest.mark.parametrize("key", [None, 5, "requests/r1/instagram/never-stored.png"])
++def test_an_image_that_is_not_in_storage_fails(key: Any) -> None:
++    base = imaged()
++    base["drafts"]["instagram"]["media"][0]["storage_key"] = key  # type: ignore[index]
++
++    result = make_check_image()(base)
++
++    assert codes(result) == ["image_missing"]
++    assert "was not found" in result.feedback
++
++
++def test_bytes_that_are_not_an_image_fail() -> None:
++    result = make_check_image()(imaged(instagram=b"<html>not an image</html>"))
++
++    assert codes(result) == ["image_invalid"]
++    assert "not a valid PNG, JPEG or WebP" in result.feedback
++
++
++@pytest.mark.parametrize(
++    ("size", "ok"),
++    [(DEFAULT_MAX_IMAGE_BYTES, True), (DEFAULT_MAX_IMAGE_BYTES + 1, False)],
++)
++def test_the_size_limit_is_a_parameter_with_an_8mb_default(size: int, ok: bool) -> None:
++    png = build_png(1024, 1280, (1, 2, 3))
++    check = make_check_image(max_image_bytes=len(png) if ok else len(png) - 1)
++
++    result = check(imaged(instagram=png))
++
++    assert result.ok is ok
++    if not ok:
++        assert codes(result) == ["image_too_large"]
++    assert size > 0
++
++
++@pytest.mark.parametrize(
++    ("width", "height", "ok"),
++    [(1024, 1280, True), (819, 1024, False), (1024, 1280, True), (1000, 1250, False)],
++)
++def test_the_short_side_must_reach_the_minimum(
++    width: int, height: int, ok: bool
++) -> None:
++    result = make_check_image()(imaged(instagram=build_png(width, height, (1, 2, 3))))
++
++    assert result.ok is ok
++    if not ok:
++        assert codes(result) == ["image_too_small"]
++        assert f"{width}x{height}" in result.feedback
++
++
++def test_the_minimum_short_side_is_a_parameter() -> None:
++    small = build_png(512, 640, (1, 2, 3))
++
++    assert make_check_image(min_short_side=512)(imaged(instagram=small)).ok is True
++    assert make_check_image()(imaged(instagram=small)).ok is False
++
++
++@pytest.mark.parametrize(
++    ("width", "height", "ok"),
++    [
++        (1024, 1280, True),  # exactly 4:5
++        (1024, 1024, True),  # 1:1 is allowed too
++        (1100, 1353, True),  # 1.6% off 4:5 is within the tolerance
++        (1024, 1280 + 60, False),  # about 4.7% off
++        (1792, 1024, False),  # 16:9 is not allowed on Instagram
++        (1280, 1024, False),
++    ],
++)
++def test_the_real_aspect_ratio_must_be_allowed(
++    width: int, height: int, ok: bool
++) -> None:
++    result = make_check_image()(imaged(instagram=build_png(width, height, (1, 2, 3))))
++
++    assert result.ok is ok
++    if not ok:
++        assert codes(result) == ["image_aspect_not_allowed"]
++        assert "1:1, 4:5" in result.feedback
++
++
++def test_a_platform_without_aspect_rules_accepts_any_ratio() -> None:
++    wide = build_png(2048, 1024, (1, 2, 3))
++
++    assert make_check_image(lambda: {})(imaged(instagram=wide, facebook=wide)).ok
++
++
++def test_an_unusable_allowed_ratio_in_the_rules_is_ignored_by_the_check() -> None:
++    wide = build_png(2048, 1024, (1, 2, 3))
++    rules = {"instagram": {"image_aspect": ["bad"]}, "facebook": {}}
++
++    result = make_check_image(lambda: rules)(imaged(instagram=wide))
++
++    assert codes(result) == ["image_aspect_not_allowed"]
++
++
++@pytest.mark.parametrize("alt", [None, "", "   ", 5])
++def test_the_alt_text_is_required(alt: Any) -> None:
++    base = imaged()
++    base["drafts"]["instagram"]["media"][0]["meta"]["alt_text"] = alt  # type: ignore[index]
++
++    result = make_check_image()(base)
++
++    assert codes(result) == ["alt_text_missing"]
++
++
++@pytest.mark.parametrize(("size", "ok"), [(200, True), (201, False)])
++def test_the_alt_text_has_at_most_200_characters(size: int, ok: bool) -> None:
++    base = imaged()
++    base["drafts"]["instagram"]["media"][0]["meta"]["alt_text"] = "a" * size  # type: ignore[index]
++
++    result = make_check_image()(base)
++
++    assert result.ok is ok
++    if not ok:
++        assert codes(result) == ["alt_text_too_long"]
++
++
++def test_media_without_meta_fails_on_the_alt_text() -> None:
++    base = imaged()
++    del base["drafts"]["facebook"]["media"][0]["meta"]  # type: ignore[index]
++
++    assert codes(make_check_image()(base)) == ["alt_text_missing"]
++
++
++def test_every_problem_is_reported_in_one_feedback() -> None:
++    result = make_check_image()(
++        imaged(instagram=build_png(800, 400, (1, 2, 3)), facebook=b"junk")
++    )
++
++    assert set(codes(result)) == {
++        "image_too_small",
++        "image_aspect_not_allowed",
++        "image_invalid",
++    }
++    assert "instagram" in result.feedback and "facebook" in result.feedback
++
++
++def test_the_rules_are_read_on_every_run() -> None:
++    rules = {"instagram": {"image_aspect": ["4:5"]}, "facebook": {}}
++    check = make_check_image(lambda: rules)
++    base = imaged()
++
++    assert check(base).ok is True
++    rules["instagram"]["image_aspect"] = ["16:9"]
++    assert codes(check(base)) == ["image_aspect_not_allowed"]
++
++
++def test_the_rules_do_not_call_the_llm_or_the_image_provider(
++    fake_llm: FakeScript, fake_image: FakeImage
++) -> None:
++    make_check_image()(imaged())
++
++    assert fake_llm.calls == [] and fake_image.calls == []
++
++
++# --------------------------------------------------------------------------
++# Judge (the text-only variant: image prompt against the caption)
++# --------------------------------------------------------------------------
++
++
++def test_the_judge_sends_prompt_alt_text_and_caption_to_the_fast_model(
++    fake_llm: FakeScript,
++) -> None:
++    fake_llm.queue(good_judge())
++    base = imaged()
++    meta = base["drafts"]["instagram"]["media"][0]["meta"]  # type: ignore[index]
++    meta.update(prompt="A cup of tea at dawn", style_notes="calm greens")
++
++    result = make_image_judge()(base)
++
++    assert result.ok is True
++    (call,) = fake_llm.calls
++    assert call.kind == "fast" and call.temperature == 0.0
++    user = call.messages[1].content
++    assert "Step being judged: image" in user
++    assert IMAGE_RUBRIC.splitlines()[0] in user
++    assert "A cup of tea at dawn" in user and "calm greens" in user
++    assert "Instagram caption" in user and "Facebook caption" in user
++    assert "Brand voice: warm and simple" in user
++
++
++def test_the_judge_copes_with_a_draft_without_an_image(fake_llm: FakeScript) -> None:
++    fake_llm.queue(good_judge())
++
++    make_image_judge()(state())
++
++    assert "Instagram caption" in fake_llm.calls[0].messages[1].content
++
++
++# --------------------------------------------------------------------------
++# The checked node (agent + rules + judge + retry + escalation)
++# --------------------------------------------------------------------------
++
++
++class Flow:
++    """START -> image (checked) -> END."""
++
++    def __init__(self, **node_args: Any) -> None:
++        self.steps: list[StepRecord] = []
++        self.node = make_image_node(**node_args)
++        builder = StateGraph(GraphState)
++        entry = add_checked_node(builder, self.node, on_pass=END)
++        builder.add_edge(START, entry)
++        self.graph = builder.compile(checkpointer=InMemorySaver())
++        self.config = {
++            "configurable": {
++                "thread_id": str(uuid.uuid4()),
++                "step_recorder": self.steps.append,
++            }
++        }
++
++    def run(self, initial: GraphState | None = None) -> dict[str, Any]:
++        return self.graph.invoke(initial or state(), self.config)
++
++    def resume(self, value: Any) -> dict[str, Any]:
++        return self.graph.invoke(Command(resume=value), self.config)
++
++
++def test_good_images_pass_at_once(fake_llm: FakeScript, fake_image: FakeImage) -> None:
++    fake_llm.queue(prompt_reply(), prompt_reply(), good_judge())
++    flow = Flow()
++
++    result = flow.run()
++
++    assert all(
++        len(result["drafts"][p]["media"]) == 1 for p in ("facebook", "instagram")
++    )
++    assert [c.kind for c in fake_llm.calls] == ["text", "text", "fast"]
++    (step,) = flow.steps
++    assert (step.node_name, step.attempt, step.verdict) == ("image", 1, "passed")
++    assert step.output_summary["prompt_version"] == "image.v1"
++    assert step.output_summary["score"] == 0.9
++
++
++def test_a_bad_image_retries_with_feedback_that_changes_the_second_attempt(
++    fake_llm: FakeScript, fake_image: FakeImage
++) -> None:
++    small = build_png(512, 640, (1, 2, 3))
++    fake_image.queue(small, small)  # attempt 1: both too small; attempt 2: the fake
++    fake_llm.queue(
++        prompt_reply(prompt="first idea", aspect_ratio="1:1"),
++        prompt_reply(prompt="first idea", aspect_ratio="4:5"),
++        prompt_reply(prompt="second idea", aspect_ratio="1:1"),
++        prompt_reply(prompt="second idea", aspect_ratio="4:5"),
++        good_judge(),
++    )
++    flow = Flow()
++
++    result = flow.run()
++
++    first, second = fake_llm.calls[0], fake_llm.calls[2]
++    assert "Previous attempt feedback" not in first.messages[1].content
++    assert "Previous attempt feedback" in second.messages[1].content
++    assert "the short side must be at least 1024 pixels" in second.messages[1].content
++    sent = [prompt for prompt, _ in fake_image.calls]
++    assert sent == ["first idea", "first idea", "second idea", "second idea"]
++    instagram = result["drafts"]["instagram"]["media"][0]
++    assert instagram["storage_key"].endswith("/image-2.png")  # attempt 2's object
++    assert instagram["meta"]["prompt"] == "second idea"
++    assert [c.kind for c in fake_llm.calls][-1] == "fast"  # the judge ran once
++    assert [s.verdict for s in flow.steps] == ["retried", "passed"]
++    assert result["retries"] == {"image": 1}
++
++
++def test_a_low_judge_score_retries_with_the_judge_feedback(
++    fake_llm: FakeScript,
++) -> None:
++    low = {
++        "ok": False,
++        "score": 0.4,
++        "issues": [
++            {"code": "off_topic", "message": "Match the caption.", "severity": "error"}
++        ],
++        "feedback": "Match the caption. Keep: the style",
++    }
++    fake_llm.queue(
++        prompt_reply(),
++        prompt_reply(),
++        low,
++        prompt_reply(),
++        prompt_reply(),
++        good_judge(),
++    )
++    flow = Flow()
++
++    flow.run()
++
++    assert "Match the caption. Keep: the style" in fake_llm.calls[3].messages[1].content
++    assert [s.verdict for s in flow.steps] == ["retried", "passed"]
++
++
++def test_exhausted_retries_escalate_and_resume_retry_continues(
++    fake_llm: FakeScript, fake_image: FakeImage
++) -> None:
++    junk = b"not an image"
++    fake_image.queue(*[junk] * 6)
++    fake_llm.queue(*[prompt_reply()] * 8, good_judge())
++    flow = Flow()
++
++    paused = flow.run()
++
++    (interrupt,) = paused["__interrupt__"]
++    assert interrupt.value["step"] == "image"
++    assert interrupt.value["reason"] == "retries_exhausted"
++    assert {i["code"] for i in interrupt.value["issues"]} == {"image_invalid"}
++
++    done = flow.resume({"action": "retry"})
++
++    assert done["drafts"]["instagram"]["media"][0]["storage_key"].endswith(".png")
++
++
++def test_a_retriable_provider_outage_is_a_retried_error_attempt(
++    fake_llm: FakeScript, fake_image: FakeImage
++) -> None:
++    fake_image.fail_next(1)
++    fake_llm.queue(*[prompt_reply()] * 4, good_judge())
++    flow = Flow()
++
++    result = flow.run()
++
++    assert len(result["drafts"]["facebook"]["media"]) == 1
++    assert [s.verdict for s in flow.steps] == ["error", "passed"]
++
++
++def test_a_provider_configuration_error_escalates_at_once(
++    fake_llm: FakeScript, fake_image: FakeImage, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    monkeypatch.setattr(
++        FakeImage,
++        "_generate",
++        lambda self, prompt, size: (_ for _ in ()).throw(ImageConfigError()),
++    )
++    fake_llm.queue(prompt_reply(), prompt_reply())
++    flow = Flow()
++
++    paused = flow.run()
++
++    (interrupt,) = paused["__interrupt__"]
++    assert interrupt.value["reason"] == "non_retriable_error"
++    assert interrupt.value["error_code"] == "image_not_configured"
++    assert [s.verdict for s in flow.steps] == ["escalated"]
++
++
++def test_without_the_judge_only_the_rules_decide(fake_llm: FakeScript) -> None:
++    fake_llm.queue(prompt_reply(), prompt_reply())
++
++    Flow(use_judge=False).run()
++
++    assert [c.kind for c in fake_llm.calls] == ["text", "text"]
++
++
++def test_the_limits_are_node_parameters(
++    fake_llm: FakeScript, fake_image: FakeImage
++) -> None:
++    fake_llm.queue(*[prompt_reply()] * 2)
++    flow = Flow(max_retries=1, use_judge=False, max_image_bytes=10)
++
++    paused = flow.run()
++
++    assert paused["__interrupt__"][0].value["max_retries"] == 1
++    assert {i["code"] for i in paused["__interrupt__"][0].value["issues"]} == {
++        "image_too_large"
++    }
++
++
++def test_the_node_uses_the_documented_step_key_and_default_limits() -> None:
++    node = make_image_node()
++
++    assert node.key == "image"
++    assert node.max_retries == 3
+diff --git a/tests/unit/test_post_subgraph.py b/tests/unit/test_post_subgraph.py
+new file mode 100644
+index 0000000..b2719c4
+--- /dev/null
++++ b/tests/unit/test_post_subgraph.py
+@@ -0,0 +1,368 @@
++"""Tests for the post subgraph and its place in the main graph (B2-10), offline."""
++
++import uuid
++from typing import Any
++
++import pytest
++from app.agents.graph import compile_graph, thread_config
++from app.agents.llm import FakeCall, FakeScript
++from app.agents.nodes.planner import make_planner_node
++from app.agents.nodes.researcher import make_researcher_node
++from app.agents.nodes.strategist import make_strategist_node
++from app.agents.post import (
++    make_hashtag_node,
++    make_image_node,
++    make_post_subgraph,
++    make_writer_node,
++)
++from app.agents.state import GraphState
++from app.providers.image import FakeImage, build_png, read_image_info
++from app.providers.search import FakeSearch
++from app.storage import get_storage_backend
++from langgraph.checkpoint.memory import InMemorySaver
++from langgraph.graph import END, START, StateGraph
++from langgraph.types import Command
++
++pytestmark = pytest.mark.usefixtures("media_root", "fake_image")
++
++JUDGE = {"ok": True, "score": 0.9, "issues": [], "feedback": ""}
++CAPTION = ("Green tea is an easy daily habit. " * 17).strip()
++TAGS = {
++    "facebook": ["#greentea", "#tea"],
++    "instagram": ["#greentea", "#tea", "#morning", "#wellness", "#habits"],
++}
++
++
++def strat(platform: str) -> dict[str, Any]:
++    return {
++        "platform": platform,
++        "tone": "warm",
++        "structure": "hook, short lines, CTA",
++        "length_target": 600,
++        "cta": "Try it",
++        "hashtag_count": len(TAGS[platform]),
++        "media_notes": "bright shots",
++        "posting_notes": "morning",
++        "video": None,
++    }
++
++
++def state(**changes: Any) -> GraphState:
++    base: dict[str, Any] = {
++        "request_id": "r1",
++        "workspace_id": "w1",
++        "user_id": "u1",
++        "topic": "Benefits of green tea",
++        "content_type": "post",
++        "target_accounts": [
++            {"account_id": "a1", "platform": "instagram"},
++            {"account_id": "a2", "platform": "facebook"},
++            {"account_id": "a3", "platform": "instagram"},
++        ],
++        "publish_at": "2026-12-01T10:00:00Z",
++        "brand_voice": "warm and simple",
++        "language": "en",
++        "plan": {"angle": "Tea is a daily habit"},
++        "research": {"facts": [], "grounded": False, "cautions": ["avoid statistics"]},
++        "strategy": {p: strat(p) for p in ("facebook", "instagram")},
++    }
++    base.update(changes)
++    return base  # type: ignore[return-value]
++
++
++class PostLLM:
++    """Answers each post-flow prompt by role, whatever the call order."""
++
++    def __init__(self, fake_llm: FakeScript) -> None:
++        self.fake = fake_llm
++        self.caption: Any = lambda platform, n: {
++            "caption": CAPTION,
++            "title": None,
++            "hook": "Green tea is an easy daily habit.",
++            "cta": None,
++            "language": "en",
++            "refused": False,
++            "reason": None,
++        }
++        self.image: Any = lambda platform, n: {
++            "prompt": f"tea on a table for {platform}",
++            "negative_prompt": None,
++            "aspect_ratio": "4:5" if platform == "instagram" else "1:1",
++            "alt_text": "A cup of green tea",
++            "style_notes": "calm greens",
++        }
++        self.tags: Any = lambda platform, n: {"hashtags": TAGS[platform]}
++        self.seen: dict[str, int] = {}
++        fake_llm.set_default(self._answer)
++
++    def _answer(self, call: FakeCall) -> dict[str, Any]:
++        system, user = call.messages[0].content, call.messages[1].content
++        if "quality judge" in system:
++            return JUDGE
++        role = (
++            "caption"
++            if "copywriter" in system
++            else "image"
++            if "art director" in system
++            else "tags"
++        )
++        platform = user.split("Platform: ")[1].split("\n")[0]
++        n = self.seen[f"{role}:{platform}"] = self.seen.get(f"{role}:{platform}", 0) + 1
++        return getattr(self, role)(platform, n)  # type: ignore[no-any-return]
++
++
++class Run:
++    """The post subgraph inside a parent graph with an in-memory checkpointer."""
++
++    def __init__(self, **parts: Any) -> None:
++        parent = StateGraph(GraphState)
++        parent.add_node("post_subgraph", make_post_subgraph(**parts))
++        parent.add_edge(START, "post_subgraph")
++        parent.add_edge("post_subgraph", END)
++        self.graph = parent.compile(checkpointer=InMemorySaver())
++        self.config = {"configurable": {"thread_id": str(uuid.uuid4())}}
++
++    def run(self, initial: GraphState | None = None) -> dict[str, Any]:
++        return self.graph.invoke(initial or state(), self.config)
++
++    def resume(self, value: Any) -> dict[str, Any]:
++        return self.graph.invoke(Command(resume=value), self.config)
++
++
++def test_the_subgraph_produces_a_full_draft_per_platform(fake_llm: FakeScript) -> None:
++    PostLLM(fake_llm)
++
++    result = Run().run()
++
++    assert set(result["drafts"]) == {"facebook", "instagram"}
++    storage = get_storage_backend()
++    for platform, size in (("facebook", (1024, 1024)), ("instagram", (1024, 1280))):
++        draft = result["drafts"][platform]
++        assert draft["caption"] == CAPTION
++        assert draft["hashtags"] == TAGS[platform]
++        (media,) = draft["media"]
++        info = read_image_info(storage.get(media["storage_key"]))
++        assert (info.width, info.height) == size  # type: ignore[union-attr]
++        assert media["meta"]["alt_text"] == "A cup of green tea"
++    assert not any(result["retries"].values())
++
++
++def test_each_platform_is_generated_once_however_many_accounts_share_it(
++    fake_llm: FakeScript, fake_image: FakeImage
++) -> None:
++    llm = PostLLM(fake_llm)
++
++    Run().run()
++
++    assert llm.seen == {
++        "caption:facebook": 1,
++        "caption:instagram": 1,
++        "image:facebook": 1,
++        "image:instagram": 1,
++        "tags:facebook": 1,
++        "tags:instagram": 1,
++    }
++    assert len(fake_image.calls) == 2  # three accounts, two images
++
++
++def test_the_steps_run_in_order_writer_image_hashtag(fake_llm: FakeScript) -> None:
++    PostLLM(fake_llm)
++
++    Run().run()
++
++    roles = []
++    for call in fake_llm.calls:
++        system = call.messages[0].content
++        if "copywriter" in system:
++            roles.append("writer")
++        elif "art director" in system:
++            roles.append("image")
++        elif "hashtag specialist" in system:
++            roles.append("hashtag")
++    assert [r for i, r in enumerate(roles) if i == 0 or r != roles[i - 1]] == [
++        "writer",
++        "image",
++        "hashtag",
++    ]
++
++
++def test_the_image_sees_the_final_caption_and_the_hashtags_see_it_too(
++    fake_llm: FakeScript,
++) -> None:
++    PostLLM(fake_llm)
++
++    Run().run()
++
++    for call in fake_llm.calls:
++        system, user = call.messages[0].content, call.messages[1].content
++        if "art director" in system or "hashtag specialist" in system:
++            assert CAPTION in user
++
++
++def test_a_failing_writer_retries_inside_the_subgraph(fake_llm: FakeScript) -> None:
++    llm = PostLLM(fake_llm)
++    good = llm.caption
++    llm.caption = lambda platform, n: (
++        {**good(platform, n), "caption": "Too short"}
++        if platform == "instagram" and n == 1
++        else good(platform, n)
++    )
++
++    result = Run().run()
++
++    assert llm.seen["caption:instagram"] == 2
++    assert result["drafts"]["instagram"]["caption"] == CAPTION
++    assert result["retries"]["writer"] == 1
++
++
++def test_a_bad_image_is_retried_without_redoing_the_writer(
++    fake_llm: FakeScript, fake_image: FakeImage
++) -> None:
++    llm = PostLLM(fake_llm)
++    fake_image.queue(build_png(256, 256, (1, 2, 3)), build_png(256, 256, (1, 2, 3)))
++
++    result = Run().run()
++
++    assert llm.seen["caption:instagram"] == 1  # the caption is not rewritten
++    assert llm.seen["image:instagram"] == 2
++    assert result["retries"]["image"] == 1
++    key = result["drafts"]["instagram"]["media"][0]["storage_key"]
++    assert key.endswith("image-2.png")
++
++
++def test_an_escalation_inside_the_subgraph_pauses_and_resumes_the_run(
++    fake_llm: FakeScript,
++) -> None:
++    llm = PostLLM(fake_llm)
++    llm.tags = lambda platform, n: {"hashtags": ["nope"] if n <= 3 else TAGS[platform]}
++    run = Run(hashtag=make_hashtag_node(max_retries=3))
++
++    paused = run.run()
++
++    (interrupt,) = paused["__interrupt__"]
++    assert interrupt.value["step"] == "hashtag"
++    assert interrupt.value["reason"] == "retries_exhausted"
++
++    done = run.resume({"action": "retry"})
++
++    assert done["drafts"]["instagram"]["hashtags"] == TAGS["instagram"]
++    assert "__interrupt__" not in done
++
++
++def test_an_aborted_escalation_ends_the_subgraph_as_failed(
++    fake_llm: FakeScript,
++) -> None:
++    llm = PostLLM(fake_llm)
++    llm.tags = lambda platform, n: {"hashtags": ["nope"]}
++    run = Run(hashtag=make_hashtag_node(max_retries=1))
++
++    run.run()
++    done = run.resume({"action": "abort"})
++
++    assert done["status"] == "failed"
++    assert "hashtag" in done["errors"][0]
++
++
++def test_the_parts_can_be_replaced(fake_llm: FakeScript) -> None:
++    PostLLM(fake_llm)
++    run = Run(
++        writer=make_writer_node(use_judge=False),
++        image=make_image_node(use_judge=False),
++        hashtag=make_hashtag_node(),
++    )
++
++    run.run()
++
++    assert not any("quality judge" in c.messages[0].content for c in fake_llm.calls)
++
++
++def test_a_refusal_in_the_writer_escalates_the_whole_subgraph(
++    fake_llm: FakeScript,
++) -> None:
++    llm = PostLLM(fake_llm)
++    llm.caption = lambda platform, n: {
++        "caption": "",
++        "title": None,
++        "hook": "",
++        "cta": None,
++        "language": "en",
++        "refused": True,
++        "reason": "unsafe topic",
++    }
++
++    paused = Run().run()
++
++    (interrupt,) = paused["__interrupt__"]
++    assert interrupt.value["step"] == "writer"
++    assert interrupt.value["reason"] == "refused"
++    assert llm.seen.get("image:facebook") is None  # nothing after the writer ran
++
++
++# --------------------------------------------------------------------------
++# In the main graph: request -> plan -> research -> strategy -> router -> post
++# --------------------------------------------------------------------------
++
++
++def shared_replies() -> list[dict[str, Any]]:
++    plan = {
++        "angle": "Green tea is a simple daily habit",
++        "audience": "busy young professionals",
++        "goal": "education",
++        "key_messages": ["Easy to start", "Small habit, steady benefit"],
++        "tone": "warm and simple",
++        "cta": "Try one cup tomorrow",
++        "format_notes": "short image post",
++        "must_avoid": ["health guarantees"],
++        "risks": ["health claims need a source"],
++        "language": "en",
++    }
++    notes = {
++        "facts": [
++            {
++                "claim": "Tea is widely drunk",
++                "source_url": "https://example.com/1",
++                "source_title": "Source 1",
++                "confidence": "high",
++            }
++        ],
++        "trends": ["Tea at work"],
++        "angles": ["Focus ritual"],
++        "cautions": ["Effects vary"],
++        "grounded": True,
++    }
++    return [
++        plan,
++        JUDGE,
++        {"queries": ["green tea benefits"]},
++        notes,
++        JUDGE,
++        {p: strat(p) for p in ("facebook", "instagram")},
++        JUDGE,
++    ]
++
++
++def test_the_main_graph_runs_from_the_request_to_the_drafts(
++    fake_llm: FakeScript,
++) -> None:
++    fake_llm.queue(*shared_replies())
++    PostLLM(fake_llm)
++    search = FakeSearch()
++    graph = compile_graph(
++        InMemorySaver(),
++        planner=make_planner_node(),
++        researcher=make_researcher_node(search_provider=lambda: search),
++        strategist=make_strategist_node(),
++        post_subgraph=make_post_subgraph(),
++    )
++    initial = state()
++    for key in ("plan", "research", "strategy"):
++        del initial[key]  # type: ignore[misc]
++
++    result = graph.invoke(initial, thread_config(str(uuid.uuid4())))
++
++    assert "__interrupt__" not in result
++    assert set(result["drafts"]) == {"facebook", "instagram"}
++    for platform in ("facebook", "instagram"):
++        draft = result["drafts"][platform]
++        assert draft["caption"] and draft["hashtags"] and len(draft["media"]) == 1
++    assert not any(result["retries"].values())
+diff --git a/tests/unit/test_writer_node.py b/tests/unit/test_writer_node.py
+new file mode 100644
+index 0000000..4bb6641
+--- /dev/null
++++ b/tests/unit/test_writer_node.py
+@@ -0,0 +1,830 @@
++"""Tests for the post-flow ``writer`` node (B2-10), with the fake LLM provider."""
++
++import json
++import re
++import uuid
++from pathlib import Path
++from typing import Any
++
++import pytest
++from app.agents.checked import StepRecord, add_checked_node
++from app.agents.llm import FakeScript, LLMOutputError
++from app.agents.platform_rules import DEFAULT_PLATFORM_RULES
++from app.agents.post.writer import (
++    WRITER_RUBRIC,
++    WriterOutput,
++    make_check_writer,
++    make_writer_agent,
++    make_writer_judge,
++    make_writer_node,
++)
++from app.agents.prompts import load_prompt
++from app.agents.state import GraphState
++from langgraph.checkpoint.memory import InMemorySaver
++from langgraph.graph import END, START, StateGraph
++from langgraph.types import Command
++from pydantic import ValidationError
++
++ROOT = Path(__file__).resolve().parents[2]
++SPEC = ROOT / "AGENT_SPECS.md"
++PROMPT = ROOT / "backend" / "app" / "agents" / "prompts" / "writer.md"
++
++LONG_ENOUGH = "Green tea is an easy daily habit. " * 17  # about 600 characters
++
++
++def out(**changes: Any) -> dict[str, Any]:
++    data: dict[str, Any] = {
++        "caption": LONG_ENOUGH.strip(),
++        "title": None,
++        "hook": "Green tea is an easy daily habit.",
++        "cta": "Try one cup tomorrow.",
++        "language": "en",
++        "refused": False,
++        "reason": None,
++    }
++    data.update(changes)
++    return data
++
++
++def good_judge(score: float = 0.9) -> dict[str, Any]:
++    return {"ok": True, "score": score, "issues": [], "feedback": ""}
++
++
++def strat(platform: str, **changes: Any) -> dict[str, Any]:
++    data: dict[str, Any] = {
++        "platform": platform,
++        "tone": "warm",
++        "structure": "hook, short lines, CTA",
++        "length_target": 600,
++        "cta": "Try it",
++        "hashtag_count": 5,
++        "media_notes": "bright photo",
++        "posting_notes": "morning",
++        "video": None,
++    }
++    data.update(changes)
++    return data
++
++
++def state(**changes: Any) -> GraphState:
++    base: dict[str, Any] = {
++        "request_id": "r1",
++        "workspace_id": "w1",
++        "user_id": "u1",
++        "topic": "Benefits of green tea",
++        "content_type": "post",
++        "target_accounts": [
++            {"account_id": "a1", "platform": "instagram"},
++            {"account_id": "a2", "platform": "facebook"},
++            {"account_id": "a3", "platform": "instagram"},
++        ],
++        "publish_at": "2026-12-01T10:00:00Z",
++        "brand_voice": "warm and simple",
++        "language": "en",
++        "plan": {"angle": "Tea is a daily habit", "key_messages": ["Easy start"]},
++        "research": {"facts": [], "grounded": False, "cautions": ["avoid statistics"]},
++        "strategy": {"instagram": strat("instagram"), "facebook": strat("facebook")},
++    }
++    base.update(changes)
++    return base  # type: ignore[return-value]
++
++
++def drafted(**captions: str) -> GraphState:
++    """A state whose drafts hold the given captions (default: a good one each)."""
++    captions = captions or {
++        "instagram": LONG_ENOUGH.strip(),
++        "facebook": LONG_ENOUGH.strip(),
++    }
++    return state(drafts={p: {"caption": c} for p, c in captions.items()})
++
++
++# --------------------------------------------------------------------------
++# Model and the spec / prompt contract
++# --------------------------------------------------------------------------
++
++
++def test_model_fields_equal_the_spec_class() -> None:
++    text = SPEC.read_text(encoding="utf-8")
++    block = re.search(r"class WriterOutput\(BaseModel\):\n(.*?)\n```", text, re.S)
++    assert block
++    spec = set(re.findall(r"^    (\w+):", block.group(1), re.M))
++
++    assert set(WriterOutput.model_fields) == spec
++
++
++def test_prompt_example_fields_equal_the_model_fields() -> None:
++    text = PROMPT.read_text(encoding="utf-8")
++    example = json.loads(re.search(r"```json\n(.*?)```", text, re.S).group(1))  # type: ignore[union-attr]
++
++    assert set(example) == set(WriterOutput.model_fields)
++    WriterOutput.model_validate(example)  # the example is itself valid
++
++
++def test_a_full_reply_round_trips_and_optional_parts_default() -> None:
++    assert WriterOutput.model_validate(out()).model_dump() == out()
++    data = out()
++    for field in ("title", "cta", "refused", "reason"):
++        del data[field]
++
++    parsed = WriterOutput.model_validate(data)
++
++    assert parsed.title is None and parsed.cta is None
++    assert parsed.refused is False and parsed.reason is None
++
++
++@pytest.mark.parametrize("field", ["caption", "hook", "language"])
++def test_the_core_fields_are_required(field: str) -> None:
++    data = out()
++    del data[field]
++
++    with pytest.raises(ValidationError):
++        WriterOutput.model_validate(data)
++
++
++def test_limits_are_rule_checks_not_schema_errors() -> None:
++    parsed = WriterOutput.model_validate(out(caption="x" * 10**6, hook=""))
++
++    assert len(parsed.caption) == 10**6 and parsed.hook == ""
++
++
++def test_text_is_trimmed() -> None:
++    assert WriterOutput.model_validate(out(caption="  hi  \n")).caption == "hi"
++
++
++# --------------------------------------------------------------------------
++# writer_agent
++# --------------------------------------------------------------------------
++
++
++def test_the_agent_writes_one_caption_per_distinct_platform(
++    fake_llm: FakeScript,
++) -> None:
++    fake_llm.queue(out(caption="Facebook text"), out(caption="Instagram text"))
++
++    result = make_writer_agent()(state())
++
++    assert result.update == {
++        "drafts": {
++            "facebook": {"caption": "Facebook text"},
++            "instagram": {"caption": "Instagram text"},
++        }
++    }
++    # Three accounts, two platforms: two calls, never one per account (FR-5.5).
++    assert len(fake_llm.calls) == 2
++    assert all(c.kind == "text" and c.temperature == 0.8 for c in fake_llm.calls)
++    assert result.prompt_version == load_prompt("writer").version == "writer.v1"
++    assert result.summary == {
++        "platforms": ["facebook", "instagram"],
++        "languages": {"facebook": "en", "instagram": "en"},
++        "caption_chars": {"facebook": 13, "instagram": 14},
++    }
++    assert result.refused_reason is None
++
++
++def test_the_prompt_gets_that_platforms_inputs(fake_llm: FakeScript) -> None:
++    fake_llm.queue(out(), out())
++    base = state(
++        language="ur",
++        brand_voice="playful pirate",
++        strategy={
++            "instagram": strat("instagram", tone="insta tone"),
++            "facebook": strat("facebook", tone="fb tone"),
++        },
++    )
++
++    make_writer_agent(banned_words=lambda: ["foo", "bar"])(base)
++
++    facebook, instagram = (c.messages for c in fake_llm.calls)
++    fb_user, ig_user = facebook[1].content, instagram[1].content
++    assert "Platform: facebook" in fb_user and "Platform: instagram" in ig_user
++    assert "fb tone" in fb_user and "insta tone" not in fb_user
++    assert "insta tone" in ig_user and "fb tone" not in ig_user
++    assert '"caption_max": 63000' in fb_user and '"caption_max": 2200' in ig_user
++    assert "Output language: ur" in ig_user
++    assert "Brand voice: playful pirate" in ig_user
++    assert "Banned words: foo, bar" in ig_user
++    assert "Tea is a daily habit" in ig_user  # plan
++    assert "avoid statistics" in ig_user  # research
++    assert "Benefits of green tea" not in instagram[0].content  # topic stays out
++
++
++def test_missing_banned_words_plan_and_research_are_sent_as_none(
++    fake_llm: FakeScript,
++) -> None:
++    fake_llm.queue(out(), out())
++    base = state()
++    del base["plan"], base["research"]  # type: ignore[misc]
++
++    make_writer_agent()(base)
++
++    user = fake_llm.calls[0].messages[1].content
++    assert "Banned words: none" in user
++    assert "Content plan:\nnone" in user and "Research notes:\nnone" in user
++
++
++def test_the_rules_come_from_the_injected_source(fake_llm: FakeScript) -> None:
++    fake_llm.queue(out(), out())
++    custom = {"instagram": {"caption_max": 111}, "facebook": {"caption_max": 222}}
++
++    make_writer_agent(lambda: custom)(state())
++
++    users = [c.messages[1].content for c in fake_llm.calls]
++    assert '"caption_max": 222' in users[0] and '"caption_max": 111' in users[1]
++
++
++def test_a_platform_without_rules_gets_none(fake_llm: FakeScript) -> None:
++    fake_llm.queue(out(), out())
++
++    make_writer_agent(lambda: {})(state())
++
++    assert "Platform rules:\nnone" in fake_llm.calls[0].messages[1].content
++
++
++def test_retry_feedback_reaches_every_platform_prompt(fake_llm: FakeScript) -> None:
++    fake_llm.queue(out(), out())
++
++    make_writer_agent()(state(feedback={"writer": "instagram: shorten it."}))
++
++    for call in fake_llm.calls:
++        assert "instagram: shorten it." in call.messages[1].content
++
++
++def test_other_draft_fields_are_kept_and_a_stale_title_is_dropped(
++    fake_llm: FakeScript,
++) -> None:
++    fake_llm.queue(out(caption="new fb"), out(caption="new ig"))
++    old = {
++        "facebook": {
++            "caption": "old",
++            "title": "stale",
++            "hashtags": ["#a"],
++            "media": [{"type": "image", "storage_key": "k"}],
++        },
++        "instagram": {"caption": "old ig", "hashtags": ["#b"]},
++    }
++
++    result = make_writer_agent()(state(drafts=old))
++
++    assert result.update["drafts"] == {
++        "facebook": {
++            "caption": "new fb",
++            "hashtags": ["#a"],
++            "media": [{"type": "image", "storage_key": "k"}],
++        },
++        "instagram": {"caption": "new ig", "hashtags": ["#b"]},
++    }
++    assert "title" in old["facebook"]  # the input state is not mutated
++
++
++def test_a_youtube_title_is_stored(fake_llm: FakeScript) -> None:
++    fake_llm.queue(out(title="Green tea in 3 steps"))
++    base = state(
++        target_accounts=[{"account_id": "a1", "platform": "youtube"}],
++        strategy={"youtube": strat("youtube")},
++    )
++
++    result = make_writer_agent()(base)
++
++    assert result.update["drafts"]["youtube"]["title"] == "Green tea in 3 steps"
++
++
++def test_a_refusal_escalates_with_the_platform_and_writes_nothing(
++    fake_llm: FakeScript,
++) -> None:
++    fake_llm.queue(out(), out(caption="", hook="", refused=True, reason="unsafe"))
++
++    result = make_writer_agent()(state())
++
++    assert result.refused_reason == "instagram: unsafe"
++    assert result.update == {}
++
++
++@pytest.mark.parametrize(
++    ("reason", "expected"),
++    [
++        (None, "facebook: the topic cannot be written safely"),
++        ("  ", "facebook: the topic cannot be written safely"),
++        ("r" * 500, "facebook: " + "r" * 199 + "…"),
++    ],
++)
++def test_the_refusal_reason_has_a_default_and_a_limit(
++    fake_llm: FakeScript, reason: str | None, expected: str
++) -> None:
++    fake_llm.queue(out(caption="", hook="", refused=True, reason=reason))
++
++    assert make_writer_agent()(state()).refused_reason == expected
++
++
++def test_a_missing_strategy_is_a_bug_not_a_retry(fake_llm: FakeScript) -> None:
++    base = state(strategy={"instagram": strat("instagram")})
++
++    with pytest.raises(ValueError, match="facebook"):
++        make_writer_agent()(base)
++    assert fake_llm.calls == []
++
++
++def test_an_invalid_reply_raises_an_output_error(fake_llm: FakeScript) -> None:
++    fake_llm.queue([1, 2], "nonsense")
++
++    with pytest.raises(LLMOutputError):
++        make_writer_agent()(state())
++
++
++# --------------------------------------------------------------------------
++# Rule checks
++# --------------------------------------------------------------------------
++
++
++def codes(result: Any) -> list[str]:
++    return [i.code for i in result.issues]
++
++
++def run_check(base: GraphState | None = None, **kwargs: Any) -> Any:
++    return make_check_writer(**kwargs)(base or drafted())
++
++
++def with_captions(**captions: str) -> GraphState:
++    return drafted(**captions)
++
++
++def test_good_captions_pass() -> None:
++    assert run_check().ok is True
++
++
++def test_a_missing_or_blank_caption_fails() -> None:
++    result = run_check(state(drafts={"instagram": {"caption": "  "}}))
++
++    assert codes(result) == ["caption_empty", "caption_empty"]
++    assert "instagram: write the caption." in result.feedback
++
++
++def test_no_drafts_at_all_fails_instead_of_crashing() -> None:
++    assert codes(run_check(state())) == ["caption_empty", "caption_empty"]
++
++
++def test_a_caption_that_is_not_text_fails() -> None:
++    result = run_check(state(drafts={"instagram": {"caption": 5}}))
++
++    assert "caption_empty" in codes(result)
++
++
++@pytest.mark.parametrize(("size", "ok"), [(2200, True), (2201, False)])
++def test_the_platform_length_limit(size: int, ok: bool) -> None:
++    rules = {"instagram": {"caption_max": 2200}, "facebook": {}}
++    base = state(
++        strategy={"instagram": strat("instagram", length_target=size)},
++        drafts={"instagram": {"caption": "x" * size}},
++        target_accounts=[{"account_id": "a1", "platform": "instagram"}],
++    )
++
++    result = make_check_writer(lambda: rules)(base)
++
++    assert result.ok is ok
++    if not ok:
++        assert codes(result) == ["caption_too_long"]
++        assert "2201 characters but the limit is 2200" in result.feedback
++
++
++def test_description_max_is_the_limit_when_there_is_no_caption_max() -> None:
++    rules = {"youtube": {"description_max": 50}}
++    base = state(
++        target_accounts=[{"account_id": "a1", "platform": "youtube"}],
++        strategy={"youtube": strat("youtube", length_target=51)},
++        drafts={"youtube": {"caption": "x" * 51, "title": "A title"}},
++    )
++
++    assert codes(make_check_writer(lambda: rules)(base)) == ["caption_too_long"]
++
++
++def test_a_platform_without_a_limit_accepts_any_length() -> None:
++    base = state(
++        strategy={"instagram": strat("instagram", length_target=5000)},
++        drafts={"instagram": {"caption": "x" * 5000}},
++        target_accounts=[{"account_id": "a1", "platform": "instagram"}],
++    )
++
++    assert make_check_writer(lambda: {})(base).ok is True
++
++
++@pytest.mark.parametrize(
++    ("length", "ok"),
++    [(419, False), (420, True), (600, True), (780, True), (781, False)],
++)
++def test_the_caption_stays_within_30_percent_of_the_target(
++    length: int, ok: bool
++) -> None:
++    result = run_check(with_captions(instagram="x" * length, facebook="x" * 600))
++
++    assert result.ok is ok
++    if not ok:
++        assert codes(result) == ["caption_off_target"]
++        assert "about 600 (420 to 780)" in result.feedback
++
++
++def test_the_off_target_message_says_which_way_to_go() -> None:
++    short = run_check(with_captions(instagram="x" * 100, facebook="x" * 600))
++    long = run_check(with_captions(instagram="x" * 1000, facebook="x" * 600))
++
++    assert "Lengthen it." in short.feedback
++    assert "Shorten it." in long.feedback
++
++
++@pytest.mark.parametrize("target", [None, 0, -5, "600", True])
++def test_a_missing_or_invalid_length_target_is_not_checked(target: Any) -> None:
++    base = drafted(instagram="x" * 50, facebook="x" * 50)
++    base["strategy"] = {
++        "instagram": strat("instagram", length_target=target),
++        "facebook": strat("facebook", length_target=target),
++    }
++
++    assert run_check(base).ok is True
++
++
++def test_a_missing_strategy_entry_is_not_checked_for_length() -> None:
++    base = drafted()
++    base["strategy"] = {}
++
++    assert run_check(base).ok is True
++
++
++@pytest.mark.parametrize(
++    "text",
++    [
++        "Start #green today " + "x" * 580,
++        "#tea first " + "x" * 580,
++        "Great #Té habit " + "x" * 580,
++        "tea\n#tea " + "x" * 580,
++    ],
++)
++def test_hashtags_in_the_caption_fail(text: str) -> None:
++    result = run_check(with_captions(instagram=text, facebook=LONG_ENOUGH.strip()))
++
++    assert codes(result) == ["hashtag_in_caption"]
++    assert "another step adds them" in result.feedback
++
++
++@pytest.mark.parametrize(
++    "text",
++    [
++        "The #1 habit " + "x" * 580,  # a number sign before a digit
++        "Learn C# " + "x" * 580,  # after a word character
++        "Use R&#39;s " + "x" * 580,  # an HTML entity
++        "Section a#b " + "x" * 580,
++        "Tag # alone " + "x" * 580,
++    ],
++)
++def test_a_number_sign_that_is_not_a_hashtag_passes(text: str) -> None:
++    assert run_check(with_captions(instagram=text, facebook="x" * 600)).ok is True
++
++
++@pytest.mark.parametrize(
++    "text",
++    [
++        "Read more at https://example.com today " + "x" * 560,
++        "Visit http://example.com " + "x" * 570,
++        "Go to www.example.com now " + "x" * 570,
++        "HTTPS://EXAMPLE.COM " + "x" * 580,
++    ],
++)
++def test_raw_urls_fail(text: str) -> None:
++    result = run_check(with_captions(instagram=text, facebook="x" * 600))
++
++    assert codes(result) == ["raw_url"]
++
++
++@pytest.mark.parametrize(
++    "text",
++    [
++        "Hello [brand] friends " + "x" * 580,
++        "Hello {{brand}} friends " + "x" * 580,
++        "Hello {brand} friends " + "x" * 580,
++        "Only closing }} " + "x" * 580,
++    ],
++)
++def test_unfilled_placeholders_fail(text: str) -> None:
++    result = run_check(with_captions(instagram=text, facebook="x" * 600))
++
++    assert codes(result) == ["placeholder_left"]
++
++
++def test_brackets_around_long_text_or_across_lines_are_not_placeholders() -> None:
++    text = "Note [" + "y" * 41 + "] " + "x" * 560
++    multi = "Item [one\ntwo] " + "x" * 580
++
++    assert run_check(with_captions(instagram=text, facebook="x" * 600)).ok is True
++    assert run_check(with_captions(instagram=multi, facebook="x" * 600)).ok is True
++
++
++def test_banned_words_fail_without_naming_the_word() -> None:
++    base = with_captions(
++        instagram="Try the forbidden brew " + "x" * 570, facebook="x" * 600
++    )
++
++    result = run_check(base, banned_words=lambda: ["forbidden"])
++
++    assert codes(result) == ["banned_word"]
++    assert "forbidden" not in result.feedback
++    assert "instagram" in result.feedback
++
++
++def test_banned_words_match_whole_words_only() -> None:
++    base = with_captions(instagram="A classy habit " + "x" * 580, facebook="x" * 600)
++
++    assert run_check(base, banned_words=lambda: ["ass"]).ok is True
++
++
++def test_a_banned_word_in_the_title_fails() -> None:
++    rules = {"youtube": {"title_max": 100}}
++    base = state(
++        target_accounts=[{"account_id": "a1", "platform": "youtube"}],
++        strategy={"youtube": strat("youtube", length_target=10)},
++        drafts={"youtube": {"caption": "x" * 10, "title": "A forbidden title"}},
++    )
++
++    result = make_check_writer(lambda: rules, lambda: ["forbidden"])(base)
++
++    assert codes(result) == ["banned_word"]
++
++
++def youtube_state(**draft: Any) -> GraphState:
++    return state(
++        target_accounts=[{"account_id": "a1", "platform": "youtube"}],
++        strategy={"youtube": strat("youtube", length_target=10)},
++        drafts={"youtube": {"caption": "x" * 10, **draft}},
++    )
++
++
++def test_youtube_needs_a_title_within_its_limit() -> None:
++    rules = {"youtube": {"title_max": 20}}
++    check = make_check_writer(lambda: rules)
++
++    assert check(youtube_state(title="A fine title")).ok is True
++    assert codes(check(youtube_state())) == ["title_missing"]
++    assert codes(check(youtube_state(title="  "))) == ["title_missing"]
++    long = check(youtube_state(title="t" * 21))
++    assert codes(long) == ["title_too_long"]
++    assert "21 characters but the limit is 20" in long.feedback
++    assert check(youtube_state(title="t" * 20)).ok is True
++
++
++def test_youtube_without_a_title_limit_accepts_any_title() -> None:
++    assert make_check_writer(lambda: {})(youtube_state(title="t" * 500)).ok is True
++
++
++def test_only_youtube_may_have_a_title() -> None:
++    base = drafted()
++    base["drafts"]["instagram"]["title"] = "A title"  # type: ignore[index]
++
++    result = run_check(base)
++
++    assert codes(result) == ["title_not_allowed"]
++    assert "instagram: leave the title empty" in result.feedback
++
++
++def test_every_problem_is_reported_in_one_feedback() -> None:
++    base = with_captions(instagram="#tag https://x.io " + "x" * 10, facebook="")
++
++    result = run_check(base)
++
++    assert set(codes(result)) == {
++        "hashtag_in_caption",
++        "raw_url",
++        "caption_off_target",
++        "caption_empty",
++    }
++    assert "instagram" in result.feedback and "facebook" in result.feedback
++
++
++def test_the_rules_and_banned_words_are_read_on_every_run() -> None:
++    rules = {"instagram": {"caption_max": 10_000}}
++    banned: list[str] = []
++    check = make_check_writer(lambda: rules, lambda: banned)
++    base = with_captions(instagram="x" * 600, facebook="x" * 600)
++
++    assert check(base).ok is True
++    rules["instagram"]["caption_max"] = 100
++    assert codes(check(base)) == ["caption_too_long"]
++    banned.append("x" * 600)  # the whole 600-character word in both captions
++    assert set(codes(check(base))) == {"caption_too_long", "banned_word"}
++
++
++def test_the_rules_do_not_call_the_llm(fake_llm: FakeScript) -> None:
++    run_check()
++
++    assert fake_llm.calls == []
++
++
++# --------------------------------------------------------------------------
++# Judge
++# --------------------------------------------------------------------------
++
++
++def test_the_judge_sends_captions_rubric_and_research_to_the_fast_model(
++    fake_llm: FakeScript,
++) -> None:
++    fake_llm.queue(good_judge())
++    base = drafted()
++    base["research"] = {"facts": [{"claim": "Tea is widely drunk"}], "grounded": True}
++
++    result = make_writer_judge()(base)
++
++    assert result.ok is True and result.score == 0.9
++    (call,) = fake_llm.calls
++    assert call.kind == "fast" and call.temperature == 0.0
++    user = call.messages[1].content
++    assert "Step being judged: writer" in user
++    assert WRITER_RUBRIC.splitlines()[0] in user
++    assert "Tea is widely drunk" in user  # research is part of the rubric
++    assert LONG_ENOUGH.strip() in user  # the captions are the output
++    assert "Brand voice: warm and simple" in user
++
++
++def test_the_judge_sees_titles_only_when_there_is_one_and_only_target_rules(
++    fake_llm: FakeScript,
++) -> None:
++    fake_llm.queue(good_judge())
++    base = youtube_state(title="A fine title")
++
++    make_writer_judge()(base)
++
++    user = fake_llm.calls[0].messages[1].content
++    assert "A fine title" in user
++    assert '"title_max": 100' in user
++    assert "instagram" not in user and "tiktok" not in user
++
++
++def test_the_judge_handles_missing_research_and_plan(fake_llm: FakeScript) -> None:
++    fake_llm.queue(good_judge())
++    base = drafted()
++    del base["research"], base["plan"]  # type: ignore[misc]
++
++    make_writer_judge()(base)
++
++    assert "Research notes (the only source of specific facts):\nnone" in (
++        fake_llm.calls[0].messages[1].content
++    )
++
++
++# --------------------------------------------------------------------------
++# The checked node (agent + rules + judge + retry)
++# --------------------------------------------------------------------------
++
++
++class Flow:
++    """START -> writer (checked) -> END."""
++
++    def __init__(self, **node_args: Any) -> None:
++        self.steps: list[StepRecord] = []
++        self.node = make_writer_node(**node_args)
++        builder = StateGraph(GraphState)
++        entry = add_checked_node(builder, self.node, on_pass=END)
++        builder.add_edge(START, entry)
++        self.graph = builder.compile(checkpointer=InMemorySaver())
++        self.config = {
++            "configurable": {
++                "thread_id": str(uuid.uuid4()),
++                "step_recorder": self.steps.append,
++            }
++        }
++
++    def run(self, initial: GraphState | None = None) -> dict[str, Any]:
++        return self.graph.invoke(initial or state(), self.config)
++
++    def resume(self, value: Any) -> dict[str, Any]:
++        return self.graph.invoke(Command(resume=value), self.config)
++
++
++def test_good_captions_pass_at_once(fake_llm: FakeScript) -> None:
++    fake_llm.queue(out(), out(), good_judge())
++    flow = Flow()
++
++    result = flow.run()
++
++    assert set(result["drafts"]) == {"facebook", "instagram"}
++    assert [c.kind for c in fake_llm.calls] == ["text", "text", "fast"]
++    (step,) = flow.steps
++    assert (step.node_name, step.attempt, step.verdict) == ("writer", 1, "passed")
++    assert step.output_summary["prompt_version"] == "writer.v1"
++    assert step.output_summary["score"] == 0.9
++
++
++def test_a_rule_failure_retries_with_feedback_that_changes_the_second_attempt(
++    fake_llm: FakeScript,
++) -> None:
++    fake_llm.queue(
++        out(),
++        out(caption="Too short"),  # attempt 1: facebook fine, instagram short
++        out(),
++        out(),  # attempt 2: both fine
++        good_judge(),
++    )
++    flow = Flow()
++
++    result = flow.run()
++
++    first, second = fake_llm.calls[1], fake_llm.calls[3]
++    assert "Previous attempt feedback" not in first.messages[1].content
++    assert "Previous attempt feedback" in second.messages[1].content
++    assert "instagram: the caption has 9 characters" in second.messages[1].content
++    assert result["drafts"]["instagram"]["caption"] == LONG_ENOUGH.strip()
++    assert [c.kind for c in fake_llm.calls] == ["text"] * 4 + ["fast"]  # judge skipped
++    assert [s.verdict for s in flow.steps] == ["retried", "passed"]
++    assert result["retries"] == {"writer": 1}
++
++
++def test_a_low_judge_score_retries_with_the_judge_feedback(
++    fake_llm: FakeScript,
++) -> None:
++    low = {
++        "ok": False,
++        "score": 0.4,
++        "issues": [
++            {"code": "weak_hook", "message": "Open stronger.", "severity": "error"}
++        ],
++        "feedback": "Open stronger. Keep: the tone",
++    }
++    fake_llm.queue(out(), out(), low, out(), out(), good_judge())
++    flow = Flow()
++
++    flow.run()
++
++    assert "Open stronger. Keep: the tone" in fake_llm.calls[4].messages[1].content
++    assert [s.verdict for s in flow.steps] == ["retried", "passed"]
++
++
++def test_exhausted_retries_escalate_and_resume_retry_continues(
++    fake_llm: FakeScript,
++) -> None:
++    bad = out(caption="short")
++    fake_llm.queue(*[bad] * 6, out(), out(), good_judge())
++    flow = Flow()
++
++    paused = flow.run()
++
++    (interrupt,) = paused["__interrupt__"]
++    assert interrupt.value["step"] == "writer"
++    assert interrupt.value["reason"] == "retries_exhausted"
++    assert {i["code"] for i in interrupt.value["issues"]} == {"caption_off_target"}
++
++    done = flow.resume({"action": "retry"})
++
++    assert set(done["drafts"]) == {"facebook", "instagram"}
++
++
++def test_a_refusal_escalates_at_once_without_retrying(fake_llm: FakeScript) -> None:
++    fake_llm.queue(out(caption="", hook="", refused=True, reason="not safe"))
++    flow = Flow()
++
++    paused = flow.run()
++
++    (interrupt,) = paused["__interrupt__"]
++    assert interrupt.value["reason"] == "refused"
++    assert interrupt.value["refused"] == "facebook: not safe"
++    assert [s.verdict for s in flow.steps] == ["escalated"]
++    assert len(fake_llm.calls) == 1
++
++
++def test_a_provider_outage_is_a_retried_error_attempt(fake_llm: FakeScript) -> None:
++    fake_llm.fail_next(1)
++    fake_llm.queue(out(), out(), good_judge())
++    flow = Flow()
++
++    result = flow.run()
++
++    assert set(result["drafts"]) == {"facebook", "instagram"}
++    assert [s.verdict for s in flow.steps] == ["error", "passed"]
++
++
++def test_without_the_judge_only_the_rules_decide(fake_llm: FakeScript) -> None:
++    fake_llm.queue(out(), out())
++
++    Flow(use_judge=False).run()
++
++    assert [c.kind for c in fake_llm.calls] == ["text", "text"]
++
++
++def test_the_banned_words_hook_reaches_prompt_and_check(fake_llm: FakeScript) -> None:
++    fake_llm.queue(out(), out(), good_judge())
++    flow = Flow(banned_words=lambda: ["xyzzy"])
++
++    flow.run()
++
++    assert "Banned words: xyzzy" in fake_llm.calls[0].messages[1].content
++
++
++def test_the_retry_limit_and_threshold_are_parameters(fake_llm: FakeScript) -> None:
++    fake_llm.queue(*[out(caption="short")] * 2)
++    flow = Flow(max_retries=1)
++
++    paused = flow.run()
++
++    assert paused["__interrupt__"][0].value["max_retries"] == 1
++    assert [s.verdict for s in flow.steps] == ["escalated"]
++
++
++def test_the_node_uses_the_documented_step_key_and_default_limits() -> None:
++    node = make_writer_node()
++
++    assert node.key == "writer"
++    assert node.max_retries == 3
++    assert DEFAULT_PLATFORM_RULES["instagram"]["caption_max"] == 2200
