@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     LLM_MODEL_TEXT: str | None = None
     LLM_MODEL_FAST: str | None = None
     IMAGE_PROVIDER: str = "fake"
+    IMAGE_MODEL: str | None = None
     VIDEO_PROVIDER: str = "fake"
     TTS_PROVIDER: str = "fake"
     SEARCH_PROVIDER: str = "fake"

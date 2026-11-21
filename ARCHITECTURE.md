@@ -293,6 +293,18 @@ Agents never import a model SDK; they call this module only.
 - `{{safety_rules}}` is built in (`prompts/fragments/safety_rules.md`, AGENT_SPECS 1.7).
 - Prompt files are declared as package data in `pyproject.toml`; a test checks that every file is covered.
 
+### 6.13 Storage and image provider (`app/storage/`, `app/providers/image.py`, B2-09)
+
+- **Storage** (`app/storage/base.py`, `local.py`, `__init__.py`): `StorageBackend` is an ABC whose public methods `put(key, data, mime) -> key`, `get(key) -> bytes`, `get_url(key) -> str`, `delete(key)` validate their input once and then call the backend hooks `_put/_get/_url/_delete`, so a future `S3Storage` gets the same checks. `get_storage_backend()` reads `STORAGE_BACKEND` on every call: `local` (default) builds `LocalStorage(STORAGE_PATH)`; `s3` is a `StorageConfigError` ("not implemented yet") and so is any unknown value or an empty `STORAGE_PATH`.
+- **Keys** are relative, `/`-separated and at most 512 characters. Every segment starts with a letter or digit and then uses only letters, digits, `.`, `_`, `-`; it may not end with `.` or be a Windows device name (`con`, `nul`, `com1`...). That rules out absolute paths, drive letters (`C:`), backslashes, `.` / `..`, empty segments, hidden names and spaces. `LocalStorage` additionally resolves the final path and refuses anything outside the root (a symlink cannot lead out). Mime must look like `type/subtype` (lower-cased); data must be non-empty bytes-like. `InvalidStorageInputError` (`invalid_storage_input`, HTTP 400, `details {field, reason}`) never echoes the value.
+- **Semantics:** `put` replaces an existing key (a re-run job writes the same key); `delete` of a missing key is a no-op; `get`/`get_url` of a missing key raise `StorageNotFoundError` (`storage_object_not_found`, 404); a directory is never an object. Local writes are atomic (temporary `.tmp-*` file in the target directory, then `os.replace`) and the temp file is removed on failure. The mime type is validated but not stored locally: the `media_assets.mime_type` column keeps it. `get_url` for local storage is a `file://` URI (a locator, not an HTTP link); serving media to users is the library/download endpoint's job (B5-01), which streams `get(key)`.
+- Errors derive from `AppError` and carry `retriable` like the other provider layers: `StorageIOError` (`storage_io_error`, retriable), `StorageConfigError`, `InvalidStorageInputError`, `StorageNotFoundError` (not retriable). Messages never contain the key, the data or a file path.
+- **Images** (`app/providers/image.py`): `ImageProvider.generate(prompt, size=(1024, 1024)) -> bytes` validates the request (non-empty prompt, `size` a `(width, height)` tuple of ints in 1..4096; `InvalidImageRequestError`) and calls the provider's `_generate`. `size` is a **request**: `FakeImage` honours it exactly, a real model picks the closest aspect ratio and decides the resolution, so callers read the real size from the bytes. `get_image_provider()` reads `IMAGE_PROVIDER` on every call: `fake` (default, the shared `FakeImage`) or `gemini`; anything else is an `ImageConfigError`.
+- `FakeImage` returns a deterministic, valid PNG (1-bit palette image built with `zlib`/`struct` only, a few KB even at 4096x4096; the colour comes from a hash of the prompt). `queue(*images)` scripts per-call answers (e.g. broken bytes), `fail_next(n, retriable=)` raises `ImageProviderError`, `calls` records `(prompt, size)`, `reset()` clears all.
+- `GeminiImage(api_key, model)` calls `POST https://generativelanguage.googleapis.com/v1/models/{model}:generateContent` over `httpx` with the key in the `x-goog-api-key` header and body `{"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseModalities": ["IMAGE"], "responseFormat": {"image": {"aspectRatio": <closest of 1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9>}}}}` (contract taken from the public Gemini image-generation docs on 2026-11-21; those ten ratios are accepted by every Gemini image model). The image is the first non-`thought` part with `inlineData` (base64; `inline_data` also accepted; line-wrapping whitespace is ignored, any other stray character is an error). The model name comes only from `IMAGE_MODEL` (no model name in code) and must match `[A-Za-z0-9][A-Za-z0-9._-]*` because it goes into the URL.
+- Image errors (`AppError` + `retriable`): `ImageConfigError` (`image_not_configured`: unknown provider, missing key or model, HTTP 401/403/404; never retriable, so a checked node escalates at once); `ImageProviderError` (`image_provider_error`: network, HTTP 429/5xx and "reply had no image" are retriable; other 4xx, unreadable JSON/base64 and non-image data are not); a blocked prompt or a finish reason other than `STOP` without an image is `ImageProviderError` with code `image_refused`, not retriable. Prompts, keys and response bodies are never logged or put in error messages.
+- Helpers for the image checks (B2-10) and for `media_assets`: `detect_image_mime(bytes)` (`image/png`, `image/jpeg`, `image/webp` by signature) and `read_image_info(bytes) -> ImageInfo(mime, width, height) | None` read the **header** of a PNG, JPEG or WebP (no imaging library). They say a file claims to be an image of that size; they do not decode the pixels.
+
 ## 7. Interfaces (extension points)
 
 ```python
@@ -318,7 +330,7 @@ class MetricsCollector(Protocol):
 - `publishers/registry.py::get_publisher(platform)` returns `MockPublisher` when `PUBLISHER_MODE=mock`, else the real class. Same for collectors.
 - `MockPublisher` returns deterministic fake IDs, can be told to fail (`FAIL_PLATFORMS`, or a magic topic) to test partial failure and retries.
 - Providers: `ImageProvider.generate(prompt, size) -> bytes`, `SceneProvider.generate(prompt, seconds) -> bytes`, `TTSProvider.speak(text, voice) -> bytes`, `SearchProvider.search(query) -> list[Result]`. Each has `Fake*` and at least one real implementation selected by config.
-- `StorageBackend.put(key, bytes, mime) -> str`, `.get_url(key)`, `.delete(key)`.
+- `StorageBackend.put(key, bytes, mime) -> str` (returns the key), `.get(key) -> bytes`, `.get_url(key) -> str`, `.delete(key)`. Details in section 6.13.
 
 ## 8. API surface (v1, prefix `/api/v1`)
 
@@ -369,7 +381,8 @@ LLM_PROVIDER=fake                  # fake (offline, default) | gemini (planned, 
 GEMINI_API_KEY=
 LLM_MODEL_TEXT=                    # set explicitly; do not hard-code in code
 LLM_MODEL_FAST=
-IMAGE_PROVIDER=fake                # fake | <real provider>
+IMAGE_PROVIDER=fake                # fake | gemini
+IMAGE_MODEL=                       # only for IMAGE_PROVIDER=gemini; set explicitly (uses GEMINI_API_KEY)
 VIDEO_PROVIDER=fake
 TTS_PROVIDER=fake
 SEARCH_PROVIDER=fake               # fake (offline, default) | tavily

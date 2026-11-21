@@ -58,7 +58,7 @@ Goal: run the full post-generation graph from a CLI with a fake LLM, including r
   **Done when:** strategy keyed by each target platform; brand voice appears in the prompt input (test). **Dep:** B2-05, B2-06. Refs: FR-5.1.
 - [x] **B2-08 Router and main graph skeleton** — `content_router` conditional edge, `graph.py` with Postgres checkpointer, placeholder subgraphs.
   **Done when:** invoking with `content_type=post` reaches the post placeholder and `video` the video placeholder. **Dep:** B2-07. Refs: FR-5.2.
-- [ ] **B2-09 Storage and image provider** — `StorageBackend` (local), `providers/image.py` (`FakeImage` returns a valid small PNG, one real provider by config).
+- [x] **B2-09 Storage and image provider** — `StorageBackend` (local), `providers/image.py` (`FakeImage` returns a valid small PNG, one real provider by config).
   **Done when:** put/get/delete test; fake image generates bytes with correct mime. **Dep:** B1-03.
 - [ ] **B2-10 Post subgraph: writer, image, hashtag** — three checked nodes; rule checks (length limits from `platform_rules`, hashtag count, image present/size); LLM-judge for tone/relevance.
   **Done when:** subgraph produces `drafts[platform]` with caption, hashtags and one image per platform; retry feedback visibly changes the second attempt (test). **Dep:** B2-04, B2-08, B2-09. Refs: FR-5.3, FR-5.5.
@@ -109,6 +109,8 @@ Goal: "Backend Core Complete" (`PRD.md` section 12) with `PUBLISHER_MODE=mock`.
   **Done when:** callback handler tested with a mocked HTTP layer; invalid `state` rejected. **Dep:** B3-02. *(Should; can follow the frontend start.)*
 - [ ] **B3-18 Backend Core Complete test** — one e2e test implementing all 10 steps of `PRD.md` section 12.
   **Done when:** green offline. **Dep:** B3-01…B3-15.
+- [ ] **B3-19 Shared media volume in Compose** — found in B2-09: no service mounts anything for `STORAGE_PATH`, so media written by the `worker` container is invisible to `api` and is lost when the containers are rebuilt. Add a named volume (e.g. `media_data`) mounted at the same path in `api` and `worker` (and `beat` if it ever touches media) and set `STORAGE_PATH` to that path in the compose environment; document it in `README.md`.
+  **Done when:** `docker compose up`, a file written through `get_storage_backend()` in the worker container is readable from the api container and survives `docker compose down` + `up`. **Dep:** B2-09. Needed before B3-07/B3-13 are run inside Docker.
 
 ## Phase B4 — Video flow (M8)
 
