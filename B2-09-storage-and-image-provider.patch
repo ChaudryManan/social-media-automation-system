@@ -1,0 +1,2495 @@
+From f6773385886634204ae1b4a6f480310a6559a296 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 21 Nov 2026 11:24:59 +0000
+Subject: [PATCH] B2-09: storage and image provider
+
+---
+ .env.example                      |   3 +-
+ .gitignore                        |   2 +-
+ ARCHITECTURE.md                   |  17 +-
+ PROGRESS.md                       |  28 +-
+ TASKS.md                          |   4 +-
+ backend/app/core/config.py        |   1 +
+ backend/app/providers/image.py    | 508 +++++++++++++++++
+ backend/app/storage/__init__.py   |  44 +-
+ backend/app/storage/base.py       | 189 +++++++
+ backend/app/storage/local.py      |  90 +++
+ tests/unit/test_image_provider.py | 880 ++++++++++++++++++++++++++++++
+ tests/unit/test_storage.py        | 544 ++++++++++++++++++
+ 12 files changed, 2299 insertions(+), 11 deletions(-)
+ create mode 100644 backend/app/providers/image.py
+ create mode 100644 backend/app/storage/base.py
+ create mode 100644 backend/app/storage/local.py
+ create mode 100644 tests/unit/test_image_provider.py
+ create mode 100644 tests/unit/test_storage.py
+
+diff --git a/.env.example b/.env.example
+index 346a189..7325fd8 100644
+--- a/.env.example
++++ b/.env.example
+@@ -14,7 +14,8 @@ LLM_PROVIDER=fake                  # fake (offline, default) | gemini (planned,
+ GEMINI_API_KEY=
+ LLM_MODEL_TEXT=                    # set explicitly; do not hard-code in code
+ LLM_MODEL_FAST=
+-IMAGE_PROVIDER=fake                # fake | <real provider>
++IMAGE_PROVIDER=fake                # fake (offline, default) | gemini
++IMAGE_MODEL=                       # only for IMAGE_PROVIDER=gemini; set explicitly (uses GEMINI_API_KEY)
+ VIDEO_PROVIDER=fake
+ TTS_PROVIDER=fake
+ SEARCH_PROVIDER=fake               # fake (offline, default) | tavily
+diff --git a/.gitignore b/.gitignore
+index 0790b8b..e016a32 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,6 +1,6 @@
+ .env
+ .venv/
+-storage/
++/storage/
+ __pycache__/
+ *.py[cod]
+ .pytest_cache/
+diff --git a/ARCHITECTURE.md b/ARCHITECTURE.md
+index d41596f..da5c521 100644
+--- a/ARCHITECTURE.md
++++ b/ARCHITECTURE.md
+@@ -293,6 +293,18 @@ Agents never import a model SDK; they call this module only.
+ - `{{safety_rules}}` is built in (`prompts/fragments/safety_rules.md`, AGENT_SPECS 1.7).
+ - Prompt files are declared as package data in `pyproject.toml`; a test checks that every file is covered.
+ 
++### 6.13 Storage and image provider (`app/storage/`, `app/providers/image.py`, B2-09)
++
++- **Storage** (`app/storage/base.py`, `local.py`, `__init__.py`): `StorageBackend` is an ABC whose public methods `put(key, data, mime) -> key`, `get(key) -> bytes`, `get_url(key) -> str`, `delete(key)` validate their input once and then call the backend hooks `_put/_get/_url/_delete`, so a future `S3Storage` gets the same checks. `get_storage_backend()` reads `STORAGE_BACKEND` on every call: `local` (default) builds `LocalStorage(STORAGE_PATH)`; `s3` is a `StorageConfigError` ("not implemented yet") and so is any unknown value or an empty `STORAGE_PATH`.
++- **Keys** are relative, `/`-separated and at most 512 characters. Every segment starts with a letter or digit and then uses only letters, digits, `.`, `_`, `-`; it may not end with `.` or be a Windows device name (`con`, `nul`, `com1`...). That rules out absolute paths, drive letters (`C:`), backslashes, `.` / `..`, empty segments, hidden names and spaces. `LocalStorage` additionally resolves the final path and refuses anything outside the root (a symlink cannot lead out). Mime must look like `type/subtype` (lower-cased); data must be non-empty bytes-like. `InvalidStorageInputError` (`invalid_storage_input`, HTTP 400, `details {field, reason}`) never echoes the value.
++- **Semantics:** `put` replaces an existing key (a re-run job writes the same key); `delete` of a missing key is a no-op; `get`/`get_url` of a missing key raise `StorageNotFoundError` (`storage_object_not_found`, 404); a directory is never an object. Local writes are atomic (temporary `.tmp-*` file in the target directory, then `os.replace`) and the temp file is removed on failure. The mime type is validated but not stored locally: the `media_assets.mime_type` column keeps it. `get_url` for local storage is a `file://` URI (a locator, not an HTTP link); serving media to users is the library/download endpoint's job (B5-01), which streams `get(key)`.
++- Errors derive from `AppError` and carry `retriable` like the other provider layers: `StorageIOError` (`storage_io_error`, retriable), `StorageConfigError`, `InvalidStorageInputError`, `StorageNotFoundError` (not retriable). Messages never contain the key, the data or a file path.
++- **Images** (`app/providers/image.py`): `ImageProvider.generate(prompt, size=(1024, 1024)) -> bytes` validates the request (non-empty prompt, `size` a `(width, height)` tuple of ints in 1..4096; `InvalidImageRequestError`) and calls the provider's `_generate`. `size` is a **request**: `FakeImage` honours it exactly, a real model picks the closest aspect ratio and decides the resolution, so callers read the real size from the bytes. `get_image_provider()` reads `IMAGE_PROVIDER` on every call: `fake` (default, the shared `FakeImage`) or `gemini`; anything else is an `ImageConfigError`.
++- `FakeImage` returns a deterministic, valid PNG (1-bit palette image built with `zlib`/`struct` only, a few KB even at 4096x4096; the colour comes from a hash of the prompt). `queue(*images)` scripts per-call answers (e.g. broken bytes), `fail_next(n, retriable=)` raises `ImageProviderError`, `calls` records `(prompt, size)`, `reset()` clears all.
++- `GeminiImage(api_key, model)` calls `POST https://generativelanguage.googleapis.com/v1/models/{model}:generateContent` over `httpx` with the key in the `x-goog-api-key` header and body `{"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseModalities": ["IMAGE"], "responseFormat": {"image": {"aspectRatio": <closest of 1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9>}}}}` (contract taken from the public Gemini image-generation docs on 2026-11-21; those ten ratios are accepted by every Gemini image model). The image is the first non-`thought` part with `inlineData` (base64; `inline_data` also accepted; line-wrapping whitespace is ignored, any other stray character is an error). The model name comes only from `IMAGE_MODEL` (no model name in code) and must match `[A-Za-z0-9][A-Za-z0-9._-]*` because it goes into the URL.
++- Image errors (`AppError` + `retriable`): `ImageConfigError` (`image_not_configured`: unknown provider, missing key or model, HTTP 401/403/404; never retriable, so a checked node escalates at once); `ImageProviderError` (`image_provider_error`: network, HTTP 429/5xx and "reply had no image" are retriable; other 4xx, unreadable JSON/base64 and non-image data are not); a blocked prompt or a finish reason other than `STOP` without an image is `ImageProviderError` with code `image_refused`, not retriable. Prompts, keys and response bodies are never logged or put in error messages.
++- Helpers for the image checks (B2-10) and for `media_assets`: `detect_image_mime(bytes)` (`image/png`, `image/jpeg`, `image/webp` by signature) and `read_image_info(bytes) -> ImageInfo(mime, width, height) | None` read the **header** of a PNG, JPEG or WebP (no imaging library). They say a file claims to be an image of that size; they do not decode the pixels.
++
+ ## 7. Interfaces (extension points)
+ 
+ ```python
+@@ -318,7 +330,7 @@ class MetricsCollector(Protocol):
+ - `publishers/registry.py::get_publisher(platform)` returns `MockPublisher` when `PUBLISHER_MODE=mock`, else the real class. Same for collectors.
+ - `MockPublisher` returns deterministic fake IDs, can be told to fail (`FAIL_PLATFORMS`, or a magic topic) to test partial failure and retries.
+ - Providers: `ImageProvider.generate(prompt, size) -> bytes`, `SceneProvider.generate(prompt, seconds) -> bytes`, `TTSProvider.speak(text, voice) -> bytes`, `SearchProvider.search(query) -> list[Result]`. Each has `Fake*` and at least one real implementation selected by config.
+-- `StorageBackend.put(key, bytes, mime) -> str`, `.get_url(key)`, `.delete(key)`.
++- `StorageBackend.put(key, bytes, mime) -> str` (returns the key), `.get(key) -> bytes`, `.get_url(key) -> str`, `.delete(key)`. Details in section 6.13.
+ 
+ ## 8. API surface (v1, prefix `/api/v1`)
+ 
+@@ -369,7 +381,8 @@ LLM_PROVIDER=fake                  # fake (offline, default) | gemini (planned,
+ GEMINI_API_KEY=
+ LLM_MODEL_TEXT=                    # set explicitly; do not hard-code in code
+ LLM_MODEL_FAST=
+-IMAGE_PROVIDER=fake                # fake | <real provider>
++IMAGE_PROVIDER=fake                # fake | gemini
++IMAGE_MODEL=                       # only for IMAGE_PROVIDER=gemini; set explicitly (uses GEMINI_API_KEY)
+ VIDEO_PROVIDER=fake
+ TTS_PROVIDER=fake
+ SEARCH_PROVIDER=fake               # fake (offline, default) | tavily
+diff --git a/PROGRESS.md b/PROGRESS.md
+index cfb36fa..73634c3 100644
+--- a/PROGRESS.md
++++ b/PROGRESS.md
+@@ -7,10 +7,10 @@
+ 
+ ## 1. NEXT ACTION (one precise step)
+ 
+-> **Start task `B2-09` (storage and image provider) in `TASKS.md`. `B2-01` to `B2-08` are done.**
+-> Create `backend/app/storage/` (or `app/providers/storage.py`, pick one and record it in Decisions) with a `StorageBackend` interface (`put(key, data: bytes, mime) -> str`, `get_url(key)`, `delete(key)`, plus a `get(key) -> bytes` needed by the publisher and tests) and a `LocalStorage` implementation under `STORAGE_PATH` (setting already exists, default `./storage`; `STORAGE_BACKEND=local|s3`, only `local` for now, unknown value -> config error). Reject path traversal and absolute keys. Then `backend/app/providers/image.py`: `ImageProvider.generate(prompt, size) -> bytes`, `FakeImage` (returns a valid small PNG built with the standard library only, no new dependency; deterministic, scriptable failure like `FakeSearch`) and a registry `get_image_provider()` on `IMAGE_PROVIDER` (setting exists, default `fake`). Follow the pattern of `providers/search.py` (errors derive from `AppError` with `retriable`, config error is non-retriable, no prompt text in logs). Done when (TASKS): put/get/delete test; the fake image generates bytes with the correct mime (PNG signature, decodable header). Choose one real image provider only if its API can be verified from public docs; otherwise leave the real one to a later decision and say so. Do not start B2-10 in the same change.
++> **Start task `B2-10` (post subgraph: writer, image, hashtag) in `TASKS.md`. `B2-01` to `B2-09` are done.**
++> Read `AGENT_SPECS.md` sections 4.1 to 4.3 (output schemas, rule checks, judge rubrics) and 6 (test fixtures) first. Create `backend/app/agents/post/` (package exists, empty): three nodes built with `make_checked_node` (step keys `writer`, `image`, `hashtag`; per platform, generated once per distinct platform and reused for all its accounts, FR-5.5), wired `writer -> image -> hashtag` into a subgraph that replaces `post_placeholder` in `build_graph` (pass it as `post_subgraph`). The subgraph writes `drafts[platform]` = `PlatformDraft` (`caption`, `hashtags`, `media: [{"type": "image", "storage_key": ..., "meta": {...}}]`, `title` for YouTube). Prompts `writer`, `image` and `hashtag` already exist in `app/agents/prompts/` (add a test that each prompt's JSON example fields equal the new Pydantic model's fields, as the other node tasks did). Use what B2-09 added: `get_image_provider().generate(prompt, size)`, `get_storage_backend().put(key, data, mime)` and `read_image_info(data)` / `detect_image_mime(data)` from `app/providers/image.py` for the image rule checks (valid image, png/jpeg/webp, size limit, allowed aspect ratio, min 1024 on the short side). `size` is a **request**: you need a small helper that turns an allowed aspect ratio (`"4:5"`) into a `(width, height)` with a 1024 short side, and the check must read the real size from the bytes. The `media_assets` table does not exist until B3, so keep `storage_key` and `meta` in the draft only. Rule checks and limits come from the injected `platform_rules()` callable (`agents/platform_rules.py`), as in B2-05..B2-07. Done when (TASKS): the subgraph produces `drafts[platform]` with caption, hashtags and one image per platform, and a test shows the retry feedback visibly changes the second attempt. Do not start B2-11 in the same change.
+ 
+-Last updated: 2026-11-20 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B2-08: main graph skeleton and Postgres checkpointer`
++Last updated: 2026-11-21 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B2-09: storage and image provider`
+ 
+ ## 2. How to resume (any agent)
+ 
+@@ -25,8 +25,8 @@ Last updated: 2026-11-20 · Last agent: Claude (chat, via cloned repo) · Branch
+ |---|---|---|---|
+ | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
+ | B1 | Foundation: auth, roles, workspaces, limits | Done | 11 / 11 |
+-| B2 | Agent engine (post flow) | In progress | 8 / 13 |
+-| B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 18 |
++| B2 | Agent engine (post flow) | In progress | 9 / 13 |
++| B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 19 |
+ | B4 | Video flow | Not started | 0 / 10 |
+ | B5 | Remaining backend (library, admin, more platforms) | Not started | 0 / 13 |
+ | B6 | Frontend integration and delivery | Not started | 0 / 7 |
+@@ -43,6 +43,7 @@ Milestones:
+ 
+ ## 5. Recently completed (newest first, keep last ~10)
+ 
++- 2026-11-21 — B2-09 completed: storage and image provider. `backend/app/storage/` (`base.py`: `StorageBackend` ABC with shared validation, `StorageError` family, `validate_key/mime/data`; `local.py`: `LocalStorage` with atomic writes and a resolved-path check; `__init__.py`: `get_storage_backend`), `backend/app/providers/image.py` (`ImageProvider`, `FakeImage`, `build_png`, `GeminiImage` over `httpx`, `get_image_provider`, `ImageError` family, `detect_image_mime`, `read_image_info`, `nearest_aspect_ratio`). New setting `IMAGE_MODEL` (`core/config.py`, `.env.example`, ARCHITECTURE env block). +215 tests (1519 passed, 0 skipped with real PostgreSQL 16 and Redis; baseline 1304); all four new modules 100% line and branch covered; 68 deliberate breakages, all caught after 3 gaps were closed (1 dead guard removed). No new dependency, no migration. New task B3-19 (shared media volume in Compose).
+ - 2026-11-20 — B2-08 completed: `backend/app/agents/graph.py` (`build_graph`, `compile_graph`, `content_router`, `route_content_type`, placeholder post/video subgraphs, `postgres_checkpointer`, `to_psycopg_url`, `thread_config`). New pinned dependencies `langgraph-checkpoint-postgres==2.0.23` and `psycopg-pool==3.3.3` (`pyproject.toml` and `Dockerfile`). +35 tests (30 unit, 5 integration on the real saver; 1304 passed, 0 skipped with PostgreSQL 16 and Redis; baseline 1269); `graph.py` 100% line and branch covered. No migration.
+ - 2026-11-20 — B2-07 completed: `backend/app/agents/nodes/strategist.py` (`VideoStrategy`, `PlatformStrategy`, `StrategyReply` root model, `make_strategy_agent`, `make_check_strategy`, `make_strategy_judge`, `make_strategist_node` returning a `CheckedNode`). +97 tests (1269 passed, 0 skipped with real PostgreSQL 16 and Redis; baseline 1172); the module is 100% line and branch covered. No new dependency, no migration, no new setting.
+ - 2026-11-20 — B2-06 completed: `backend/app/providers/search.py` (`SearchProvider`, `SearchResult`, `FakeSearch`, `TavilySearch` over `httpx`, `get_search_provider`, `SearchError` family with `retriable`) and `backend/app/agents/nodes/researcher.py` (`SearchQueries`, `Fact`, `ResearchNotes`, `make_research_agent`, `check_research`, `make_research_judge`, `make_researcher_node` returning a `CheckedNode`). New setting `TAVILY_API_KEY`. +88 tests (1172 passed, 0 skipped with real PostgreSQL 16 and Redis; baseline 1084); both new modules 100% line and branch covered. No new dependency, no migration.
+@@ -77,6 +78,12 @@ Milestones:
+ 
+ | Date | ID | Decision | Why | Docs updated |
+ |---|---|---|---|---|
++| 2026-11-21 | B2-09-1 | Storage lives in `backend/app/storage/` (`base.py`, `local.py`, `__init__.py` with `get_storage_backend`), not in `providers/`. `StorageBackend` is a template-method ABC: public `put/get/get_url/delete` validate and call `_put/_get/_url/_delete`. `put` returns the key; `get(key) -> bytes` was added to the interface (the publisher and tests need it); `delete` of a missing key is a no-op; `put` replaces. | Matches the ARCHITECTURE layout (`storage/base.py, local.py, s3.py`); a future S3 backend inherits the same validation instead of re-implementing it; idempotent jobs (AGENTS section 4). | ARCHITECTURE 6.13, section 7 |
++| 2026-11-21 | B2-09-2 | Keys: relative, `/`-separated, max 512 chars, segments `[A-Za-z0-9][A-Za-z0-9._-]*` that do not end with `.` and are not Windows device names; `LocalStorage` also checks the resolved path stays inside the root (symlinks). Mime must be `type/subtype` and is validated but not stored locally; empty data is rejected. `get_url` for local storage is a `file://` URI. Errors never contain the key, data or a path. | The project is developed on Windows (reserved names, drive letters, backslashes) and keys will contain ids that come from the database; traversal must be impossible by construction. `media_assets.mime_type` already keeps the mime. HTTP serving of media belongs to the library/download endpoint (B5-01), which streams `get(key)`. | ARCHITECTURE 6.13 |
++| 2026-11-21 | B2-09-3 | `ImageProvider.generate(prompt, size=(1024, 1024))`: `size` is a `(width, height)` tuple of ints in 1..4096 and is only a **request**. `FakeImage` honours it exactly; `GeminiImage` maps it to the closest of ten aspect ratios and the model decides the resolution. Callers read the real size from the bytes with the new `read_image_info` (PNG, JPEG, WebP header, no imaging library, no pixel decoding) and the mime with `detect_image_mime`. | The task text said `generate(prompt, size)` without a type; a platform needs an aspect ratio, a model gives its own resolution, so the checks of B2-10 must measure the result. Header readers were verified against Pillow (PNG, JPEG, WebP lossy/lossless/extended) outside the project; Pillow is not a dependency. | ARCHITECTURE 6.13 |
++| 2026-11-21 | B2-09-4 | `FakeImage` returns a deterministic 1-bit palette PNG built with `zlib`/`struct` (colour = hash of the prompt, any size up to 4096x4096 in a few KB). It has `queue(*images)` (scripted bytes, e.g. broken images), `fail_next(n, retriable=)`, `calls`, `reset()`, like `FakeSearch`. | Done-when asks for a valid small PNG with no new dependency; honouring the requested size lets the min-resolution check (1024 short side) pass with the fake. A structural PNG test (CRCs, chunk order, decompressed length) and an independent Pillow decode confirm validity. | ARCHITECTURE 6.13 |
++| 2026-11-21 | B2-09-5 | First real image provider is **Gemini** native image generation (`IMAGE_PROVIDER=gemini`): `POST https://generativelanguage.googleapis.com/v1/models/{model}:generateContent`, header `x-goog-api-key`, body with `generationConfig.responseModalities=["IMAGE"]` and `responseFormat.image.aspectRatio`; the image is the first non-`thought` part with `inlineData`. New setting `IMAGE_MODEL` (no model name in code; validated against `[A-Za-z0-9][A-Za-z0-9._-]*` because it goes into the URL); the key is the existing `GEMINI_API_KEY`. Aspect ratios are limited to the ten accepted by every Gemini image model. Checked against the public docs (ai.google.dev, image generation) on 2026-11-21. | PRD open question 1 defaults to Gemini; the task allows one real provider only if its API can be verified from public docs, and it could. The docs name several model generations and change often, hence no hard-coded model. | ARCHITECTURE 6.13 and env block, `.env.example`, `core/config.py` |
++| 2026-11-21 | B2-09-6 | Image error mapping: HTTP 401/403/404, unknown provider, missing key or model -> `ImageConfigError` (not retriable, escalates at once); network, 429, 5xx and "reply without an image" -> retriable `ImageProviderError`; other 4xx, unreadable JSON/base64, non-image data -> not retriable; a blocked prompt or a finish reason other than `STOP` without an image -> `ImageProviderError` code `image_refused`, not retriable. Base64 is decoded strictly after removing whitespace (a stray character is an error, never dropped). Prompts, keys and response bodies are never logged or put in messages. | Same rules as the search layer and B2-04-5 (refusals escalate); silent dropping of characters would corrupt an image without any error. | ARCHITECTURE 6.13 |
+ | 2026-11-20 | B2-08-1 | `content_router` is a pass-through **node** plus a conditional edge (`route_content_type`), a pure function of `content_type` (anything else raises `ValueError`). It does not touch `rerun_from`; the content subgraphs consume it. | A node can be the target of the reviewer and approval re-entry edges (B2-11). `rerun_from` names nodes inside the subgraphs (AGENT_SPECS 5.2), and the planner/strategist re-entry targets come before the router, so the router has nothing to decide from it. | ARCHITECTURE 6.12 |
+ | 2026-11-20 | B2-08-2 | Placeholder subgraphs write `drafts = {}` (no new state key) and both go to `END` for now; real subgraphs are passed to `build_graph`. The tests tell the branches apart from the streamed node names. | `GraphState` may not get invented keys. | ARCHITECTURE 6.12 |
+ | 2026-11-20 | B2-08-3 | Dependencies: `langgraph-checkpoint-postgres==2.0.23` (works with the pinned `langgraph-checkpoint==2.0.26`; 2.0.25 and later need `>=2.1.2`) and `psycopg-pool==3.3.3` (its required pool library, tested with `psycopg==3.2.9`). `orjson` comes in transitively. Checkpoint tables are created by the saver's `setup()` in the connection's default schema of `DATABASE_URL`; the integration test uses a private schema (`ckpt_test`) through `search_path` so the migrated schema stays untouched. | Newest version compatible with the existing pins; keeps ARCHITECTURE 6.5 (library `setup()`, not Alembic). | ARCHITECTURE 6.5, 6.12, `pyproject.toml`, `Dockerfile` |
+@@ -145,6 +152,7 @@ Milestones:
+ ## 8. Known issues, blockers, open questions
+ 
+ **Known issues / tech debt:**
++- Storage and images (B2-09): `GeminiImage` was tested with a mocked HTTP layer only (no `-m live` contract test yet); the endpoint (`v1`) and the request field `responseFormat.image.aspectRatio` come from the docs page read on 2026-11-21, which elsewhere also shows older spellings (`v1beta`, `imageConfig`), so if a first live call returns HTTP 400 check those two first. A model decides the output resolution (1K by default), so `size` is only a request; there is no helper yet from an aspect-ratio string (`"4:5"`) to a size (B2-10 needs one). `STORAGE_BACKEND=s3` is a config error (not implemented). `put` has no size limit (the image rule check owns it) and nothing deletes old media (DATABASE.md 6 mentions an optional 30-day janitor). **`docker-compose.yml` has no volume for `STORAGE_PATH`: media written by `worker` is not visible to `api` and is lost on rebuild (task B3-19).** The relative default `./storage` is resolved against the working directory when the backend is built.
+ - Main graph (B2-08): the `Dockerfile` was edited (two new pins) but **not built** in this sandbox (no Docker); check `docker compose build` once. `postgres_checkpointer` opens one `psycopg` connection per `with` block (no pool): the Celery worker (B3) should open it once per process or per task and not share a saver between threads. Checkpoints are never deleted (retention is not designed yet; they grow with every step of every request). The placeholders end at `END`, so a finished run has no reviewer or approval yet (B2-11, B3-07). The Postgres integration test creates and drops the `ckpt_test` schema on the module's `sma_test` database.
+ - Strategist (B2-07): `length_target` for a video (seconds) and `video.target_duration_s` are checked separately and may differ; the video nodes (B4) should treat `video.target_duration_s` as the target. `format` (`short`/`long`) is not tied to a per-format duration limit (AGENT_SPECS section 2 says YouTube short vs long limits are configurable; there is only one `video_max_seconds` key today). `max_scenes` and the platform rules are injected arguments; nothing reads them from `system_settings` yet. Prompt wording is untested against a real model. The strategy is not told to match the plan's language beyond the prompt rule (no language check).
+ - Researcher (B2-06): the judge sees the notes and the plan but **not** the raw search results (they are not in `GraphState`, and no state key may be invented), so it cannot verify that a `source_url` really came from a search; a rule check only requires an http(s) link. If hallucinated sources show up with a real model, add the retrieved URLs to the state (document it first) and check membership. A retry repeats the queries and the searches (no cache). The number of results per query (5) and `max_queries` (5) are code defaults, not yet read from `system_settings`. The ungrounded caution text is English whatever the request language. `TavilySearch` was tested with a mocked HTTP layer only (no live call, no `-m live` contract test yet). Prompt wording is untested against a real model.
+@@ -190,6 +198,16 @@ Template — copy for each session:
+ - Watch out: <gotchas, flaky tests, decisions the next agent must know>
+ ```
+ 
++### 2026-11-21 — Claude (chat, cloned the public repo) — B2-09
++- Did: storage backend and image provider.
++  - `backend/app/storage/{base,local,__init__}.py`, `backend/app/providers/image.py`; new setting `IMAGE_MODEL` (`core/config.py`, `.env.example`).
++  - Tests: `tests/unit/test_storage.py` (81: round trip, overwrite, idempotent delete, 22 unsafe-key cases on all four operations, symlink escape, Windows names, mime and data validation, I/O failures with monkeypatched `os.replace`/`read_bytes`/`unlink`, a fresh backend inheriting validation, registry), `tests/unit/test_image_provider.py` (134: structural PNG check, fake scripting, request validation, PNG/JPEG/WebP header readers with hand-made headers, aspect ratios, Gemini with `httpx.MockTransport`: request shape, thought parts, every error path, nothing sensitive in errors or logs, registry).
++  - Docs: `ARCHITECTURE.md` new 6.13, interface line and env block; `TASKS.md` B2-09 ticked and B3-19 added; this file.
++- State: `ruff check` clean (new files also `ruff format` clean); 1519 passed, 0 skipped (PostgreSQL 16 on 15432 and Redis; baseline 1304); the four new modules 100% line and branch. 68 deliberate breakages run with a script: 5 first slipped through (a dead guard, a missing scan-data test, lenient base64, 2 typos in my own script); the dead guard was removed, 2 tests and a stricter decode added, then all 68 were caught. Independent check with Pillow (outside the project): the fake PNG decodes at every size and the header readers match real PNG/JPEG/WebP encoders. Docker not built (no dependency changed).
++- Left undone: nothing for B2-09. Not done on purpose: S3 backend, HTTP serving of media, a `-m live` Gemini contract test, an aspect-ratio to size helper (B2-10), the shared media volume (B3-19).
++- Next: `B2-10` (post subgraph: writer, image, hashtag); see section 1.
++- Watch out: `FakeImage` returns exactly the requested size, a real model does not: always measure with `read_image_info`. `generate()` validates before the provider runs, so an invalid request never shows up in `FakeImage.calls`. `get_image_provider()` and `get_storage_backend()` read settings on every call; tests that use them must set env vars and call `get_settings.cache_clear()` (see the `env` fixture in the new tests). Changing `IMAGE_PROVIDER` to `gemini` needs `GEMINI_API_KEY` and `IMAGE_MODEL`, otherwise `image_not_configured`.
++
+ ### 2026-11-20 — Claude (chat, cloned the public repo) — B2-08
+ - Did: router and main graph skeleton.
+   - `backend/app/agents/graph.py`; pins in `pyproject.toml` and `Dockerfile`.
+diff --git a/TASKS.md b/TASKS.md
+index 735e9c5..e93f45a 100644
+--- a/TASKS.md
++++ b/TASKS.md
+@@ -58,7 +58,7 @@ Goal: run the full post-generation graph from a CLI with a fake LLM, including r
+   **Done when:** strategy keyed by each target platform; brand voice appears in the prompt input (test). **Dep:** B2-05, B2-06. Refs: FR-5.1.
+ - [x] **B2-08 Router and main graph skeleton** — `content_router` conditional edge, `graph.py` with Postgres checkpointer, placeholder subgraphs.
+   **Done when:** invoking with `content_type=post` reaches the post placeholder and `video` the video placeholder. **Dep:** B2-07. Refs: FR-5.2.
+-- [ ] **B2-09 Storage and image provider** — `StorageBackend` (local), `providers/image.py` (`FakeImage` returns a valid small PNG, one real provider by config).
++- [x] **B2-09 Storage and image provider** — `StorageBackend` (local), `providers/image.py` (`FakeImage` returns a valid small PNG, one real provider by config).
+   **Done when:** put/get/delete test; fake image generates bytes with correct mime. **Dep:** B1-03.
+ - [ ] **B2-10 Post subgraph: writer, image, hashtag** — three checked nodes; rule checks (length limits from `platform_rules`, hashtag count, image present/size); LLM-judge for tone/relevance.
+   **Done when:** subgraph produces `drafts[platform]` with caption, hashtags and one image per platform; retry feedback visibly changes the second attempt (test). **Dep:** B2-04, B2-08, B2-09. Refs: FR-5.3, FR-5.5.
+@@ -109,6 +109,8 @@ Goal: "Backend Core Complete" (`PRD.md` section 12) with `PUBLISHER_MODE=mock`.
+   **Done when:** callback handler tested with a mocked HTTP layer; invalid `state` rejected. **Dep:** B3-02. *(Should; can follow the frontend start.)*
+ - [ ] **B3-18 Backend Core Complete test** — one e2e test implementing all 10 steps of `PRD.md` section 12.
+   **Done when:** green offline. **Dep:** B3-01…B3-15.
++- [ ] **B3-19 Shared media volume in Compose** — found in B2-09: no service mounts anything for `STORAGE_PATH`, so media written by the `worker` container is invisible to `api` and is lost when the containers are rebuilt. Add a named volume (e.g. `media_data`) mounted at the same path in `api` and `worker` (and `beat` if it ever touches media) and set `STORAGE_PATH` to that path in the compose environment; document it in `README.md`.
++  **Done when:** `docker compose up`, a file written through `get_storage_backend()` in the worker container is readable from the api container and survives `docker compose down` + `up`. **Dep:** B2-09. Needed before B3-07/B3-13 are run inside Docker.
+ 
+ ## Phase B4 — Video flow (M8)
+ 
+diff --git a/backend/app/core/config.py b/backend/app/core/config.py
+index 19b0d1f..e2259af 100644
+--- a/backend/app/core/config.py
++++ b/backend/app/core/config.py
+@@ -35,6 +35,7 @@ class Settings(BaseSettings):
+     LLM_MODEL_TEXT: str | None = None
+     LLM_MODEL_FAST: str | None = None
+     IMAGE_PROVIDER: str = "fake"
++    IMAGE_MODEL: str | None = None
+     VIDEO_PROVIDER: str = "fake"
+     TTS_PROVIDER: str = "fake"
+     SEARCH_PROVIDER: str = "fake"
+diff --git a/backend/app/providers/image.py b/backend/app/providers/image.py
+new file mode 100644
+index 0000000..c5a4f69
+--- /dev/null
++++ b/backend/app/providers/image.py
+@@ -0,0 +1,508 @@
++"""Image provider interface and implementations (``ARCHITECTURE.md`` 6.13).
++
++``ImageProvider.generate(prompt, size)`` returns the encoded image bytes. The
++provider is chosen by the ``IMAGE_PROVIDER`` setting through
++:func:`get_image_provider`:
++
++* ``fake`` (default): offline, deterministic, scriptable (:class:`FakeImage`).
++* ``gemini``: Gemini native image generation over ``httpx`` (needs
++  ``GEMINI_API_KEY`` and ``IMAGE_MODEL``).
++
++``size`` is a *request* ``(width, height)``. The fake honours it exactly; a real
++model picks the closest aspect ratio it supports and decides the resolution, so
++callers must read the real dimensions from the bytes with
++:func:`read_image_info` (the same helper gives the mime type for storage).
++
++Agents never import an HTTP client or an image SDK; they call this module only.
++Prompts are never logged or put in error messages (the log line carries
++provider, size in bytes and latency only).
++"""
++
++import base64
++import binascii
++import hashlib
++import logging
++import math
++import re
++import struct
++import time
++import zlib
++from abc import ABC, abstractmethod
++from dataclasses import dataclass
++from typing import Any
++
++import httpx
++
++from app.core.config import get_settings
++from app.core.errors import AppError
++
++logger = logging.getLogger(__name__)
++
++ImageSize = tuple[int, int]
++
++DEFAULT_IMAGE_SIZE: ImageSize = (1024, 1024)
++MIN_DIMENSION = 1
++MAX_DIMENSION = 4096
++
++GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1"
++GEMINI_TIMEOUT_SECONDS = 120.0
++# Aspect ratios accepted by every Gemini image model in the public docs
++# (some models also take 1:4, 1:8, 4:1 and 8:1; these ten work everywhere).
++GEMINI_ASPECT_RATIOS = (
++    "1:1",
++    "2:3",
++    "3:2",
++    "3:4",
++    "4:3",
++    "4:5",
++    "5:4",
++    "9:16",
++    "16:9",
++    "21:9",
++)
++_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
++
++
++# --------------------------------------------------------------------------
++# Errors
++# --------------------------------------------------------------------------
++
++
++class ImageError(AppError):
++    """Base class for image layer failures."""
++
++    def __init__(
++        self,
++        message: str = "Image generation failed",
++        code: str = "image_error",
++        http_status: int = 502,
++        retriable: bool = True,
++    ) -> None:
++        super().__init__(code=code, message=message, http_status=http_status)
++        self.retriable = retriable
++
++
++class ImageConfigError(ImageError):
++    """The image provider is unknown or not configured (never retriable)."""
++
++    def __init__(self, message: str = "Image generation is not configured") -> None:
++        super().__init__(
++            message=message,
++            code="image_not_configured",
++            http_status=500,
++            retriable=False,
++        )
++
++
++class InvalidImageRequestError(ImageError):
++    """The prompt or size was rejected before any provider call (a caller bug)."""
++
++    def __init__(self, message: str = "Invalid image request") -> None:
++        super().__init__(
++            message=message,
++            code="invalid_image_request",
++            http_status=400,
++            retriable=False,
++        )
++
++
++class ImageProviderError(ImageError):
++    """The provider call failed (network, quota, refusal, unusable reply...)."""
++
++    def __init__(
++        self,
++        message: str = "Image provider call failed",
++        retriable: bool = True,
++        code: str = "image_provider_error",
++    ) -> None:
++        super().__init__(
++            message=message, code=code, http_status=502, retriable=retriable
++        )
++
++
++# --------------------------------------------------------------------------
++# Image header reading (mime type and dimensions without an imaging library)
++# --------------------------------------------------------------------------
++
++PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
++_JPEG_SOF = frozenset(range(0xC0, 0xD0)) - {0xC4, 0xC8, 0xCC}
++_JPEG_STANDALONE = frozenset({0x01, *range(0xD0, 0xD9)})
++
++
++@dataclass(frozen=True)
++class ImageInfo:
++    """What the header of an image says: ``mime`` and pixel size."""
++
++    mime: str
++    width: int
++    height: int
++
++
++def detect_image_mime(data: bytes) -> str | None:
++    """``image/png``, ``image/jpeg`` or ``image/webp`` by signature, else ``None``."""
++    if data.startswith(PNG_SIGNATURE):
++        return "image/png"
++    if data.startswith(b"\xff\xd8\xff"):
++        return "image/jpeg"
++    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
++        return "image/webp"
++    return None
++
++
++def read_image_info(data: bytes) -> ImageInfo | None:
++    """Mime type and size from the header of a PNG, JPEG or WebP.
++
++    Returns ``None`` when the bytes are not one of those formats or the header
++    is truncated or inconsistent. Only the header is read: this says the file
++    *claims* to be a valid image of that size, it does not decode the pixels.
++    """
++    readers = {
++        "image/png": _png_size,
++        "image/jpeg": _jpeg_size,
++        "image/webp": _webp_size,
++    }
++    mime = detect_image_mime(data)
++    if mime is None:
++        return None
++    size = readers[mime](data)
++    if size is None or min(size) < 1:
++        return None
++    return ImageInfo(mime=mime, width=size[0], height=size[1])
++
++
++def _png_size(data: bytes) -> ImageSize | None:
++    if len(data) < 24 or data[12:16] != b"IHDR":
++        return None
++    width, height = struct.unpack(">II", data[16:24])
++    return width, height
++
++
++def _jpeg_size(data: bytes) -> ImageSize | None:
++    pos, end = 2, len(data)
++    while pos + 4 <= end:
++        if data[pos] != 0xFF:
++            return None
++        marker = data[pos + 1]
++        if marker == 0xFF:  # fill byte
++            pos += 1
++            continue
++        if marker in _JPEG_STANDALONE:
++            pos += 2
++            continue
++        if marker in (0x00, 0xD9, 0xDA):  # invalid, end of image, start of scan
++            return None
++        length = int.from_bytes(data[pos + 2 : pos + 4], "big")
++        if marker in _JPEG_SOF:
++            if pos + 9 > end:
++                return None
++            height = int.from_bytes(data[pos + 5 : pos + 7], "big")
++            width = int.from_bytes(data[pos + 7 : pos + 9], "big")
++            return width, height
++        pos += 2 + length
++    return None
++
++
++def _webp_size(data: bytes) -> ImageSize | None:
++    kind = data[12:16]
++    if kind == b"VP8X" and len(data) >= 30:
++        width = int.from_bytes(data[24:27], "little") + 1
++        height = int.from_bytes(data[27:30], "little") + 1
++        return width, height
++    if kind == b"VP8 " and len(data) >= 30 and data[23:26] == b"\x9d\x01\x2a":
++        width = int.from_bytes(data[26:28], "little") & 0x3FFF
++        height = int.from_bytes(data[28:30], "little") & 0x3FFF
++        return width, height
++    if kind == b"VP8L" and len(data) >= 25 and data[20] == 0x2F:
++        bits = int.from_bytes(data[21:25], "little")
++        return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
++    return None
++
++
++# --------------------------------------------------------------------------
++# Interface
++# --------------------------------------------------------------------------
++
++
++class ImageProvider(ABC):
++    """Interface every image provider implements.
++
++    ``generate`` validates the request once, then calls the provider's
++    ``_generate``; every implementation therefore rejects the same bad input.
++    """
++
++    name: str
++
++    def generate(self, prompt: str, size: ImageSize = DEFAULT_IMAGE_SIZE) -> bytes:
++        """Return encoded image bytes (PNG, JPEG or WebP) for ``prompt``."""
++        return self._generate(_clean_prompt(prompt), _validate_size(size))
++
++    @abstractmethod
++    def _generate(self, prompt: str, size: ImageSize) -> bytes: ...
++
++
++def _clean_prompt(prompt: object) -> str:
++    if not isinstance(prompt, str) or not prompt.strip():
++        raise InvalidImageRequestError("The image prompt is empty")
++    return prompt.strip()
++
++
++def _validate_size(size: object) -> ImageSize:
++    ok = (
++        isinstance(size, tuple)
++        and len(size) == 2
++        and all(isinstance(v, int) and not isinstance(v, bool) for v in size)
++        and all(MIN_DIMENSION <= v <= MAX_DIMENSION for v in size)
++    )
++    if not ok:
++        raise InvalidImageRequestError(
++            f"Image size must be (width, height) in {MIN_DIMENSION}..{MAX_DIMENSION}"
++        )
++    return size  # type: ignore[return-value]
++
++
++# --------------------------------------------------------------------------
++# Fake provider
++# --------------------------------------------------------------------------
++
++
++def _png_chunk(kind: bytes, payload: bytes) -> bytes:
++    body = kind + payload
++    return (
++        struct.pack(">I", len(payload))
++        + body
++        + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
++    )
++
++
++def build_png(width: int, height: int, color: tuple[int, int, int]) -> bytes:
++    """A valid single-colour PNG built with the standard library only.
++
++    It is a 1-bit palette image (one bit per pixel, all pixels use the first
++    palette colour), so even 4096x4096 is a few kilobytes.
++    """
++    header = struct.pack(">IIBBBBB", width, height, 1, 3, 0, 0, 0)
++    palette = bytes(color) + b"\xff\xff\xff"
++    row = b"\x00" * (1 + (width + 7) // 8)  # filter byte 0 + all-zero pixel bits
++    return (
++        PNG_SIGNATURE
++        + _png_chunk(b"IHDR", header)
++        + _png_chunk(b"PLTE", palette)
++        + _png_chunk(b"IDAT", zlib.compress(row * height, 9))
++        + _png_chunk(b"IEND", b"")
++    )
++
++
++class FakeImage(ImageProvider):
++    """Offline provider for tests and development.
++
++    Without a script it returns a PNG of exactly the requested size whose
++    colour is derived from the prompt (same prompt, same bytes). ``queue``
++    gives per-call answers (consumed in order, e.g. broken bytes to exercise an
++    image check), ``fail_next(n)`` makes the next ``n`` calls raise
++    :class:`ImageProviderError`. Every call is recorded in ``calls`` as
++    ``(prompt, size)``.
++    """
++
++    name = "fake"
++
++    def __init__(self) -> None:
++        self.calls: list[tuple[str, ImageSize]] = []
++        self._queue: list[bytes] = []
++        self._failures = 0
++        self._failure_retriable = True
++
++    def queue(self, *images: bytes) -> None:
++        self._queue.extend(images)
++
++    def fail_next(self, count: int = 1, *, retriable: bool = True) -> None:
++        self._failures = count
++        self._failure_retriable = retriable
++
++    def reset(self) -> None:
++        self.calls.clear()
++        self._queue.clear()
++        self._failures = 0
++        self._failure_retriable = True
++
++    def _generate(self, prompt: str, size: ImageSize) -> bytes:
++        self.calls.append((prompt, size))
++        if self._failures > 0:
++            self._failures -= 1
++            raise ImageProviderError(
++                "Fake image failure", retriable=self._failure_retriable
++            )
++        if self._queue:
++            return self._queue.pop(0)
++        digest = hashlib.sha256(prompt.encode("utf-8")).digest()
++        return build_png(size[0], size[1], (digest[0], digest[1], digest[2]))
++
++
++_fake_image = FakeImage()
++
++
++def get_fake_image() -> FakeImage:
++    """The shared fake provider returned by ``get_image_provider()`` in fake mode."""
++    return _fake_image
++
++
++# --------------------------------------------------------------------------
++# Gemini provider
++# --------------------------------------------------------------------------
++
++
++def nearest_aspect_ratio(size: ImageSize) -> str:
++    """The Gemini aspect ratio closest to ``size`` (compared on a log scale)."""
++    target = math.log(size[0] / size[1])
++
++    def distance(ratio: str) -> float:
++        w, h = (int(part) for part in ratio.split(":"))
++        return abs(math.log(w / h) - target)
++
++    return min(GEMINI_ASPECT_RATIOS, key=distance)
++
++
++class GeminiImage(ImageProvider):
++    """Gemini native image generation (``models/{model}:generateContent``).
++
++    The request is ``{"contents": [...], "generationConfig": {"responseModalities":
++    ["IMAGE"], "responseFormat": {"image": {"aspectRatio": ...}}}}`` with the key
++    in the ``x-goog-api-key`` header; the image is the first non-thought part
++    with ``inlineData`` (base64). Contract taken from the public Gemini API
++    docs (checked 2026-11-21); no live call has been made yet.
++    """
++
++    name = "gemini"
++
++    def __init__(
++        self,
++        api_key: str | None,
++        model: str | None,
++        *,
++        base_url: str = GEMINI_BASE_URL,
++        timeout: float = GEMINI_TIMEOUT_SECONDS,
++        client: httpx.Client | None = None,
++    ) -> None:
++        if not api_key:
++            raise ImageConfigError("GEMINI_API_KEY is not set")
++        model = (model or "").strip()
++        if not model:
++            raise ImageConfigError("IMAGE_MODEL is not set")
++        if not _MODEL_NAME.match(model):
++            raise ImageConfigError("IMAGE_MODEL contains invalid characters")
++        self._api_key = api_key
++        self.model = model
++        self._url = f"{base_url.rstrip('/')}/models/{model}:generateContent"
++        self._timeout = timeout
++        self._client = client
++
++    def _generate(self, prompt: str, size: ImageSize) -> bytes:
++        started = time.monotonic()
++        body = {
++            "contents": [{"parts": [{"text": prompt}]}],
++            "generationConfig": {
++                "responseModalities": ["IMAGE"],
++                "responseFormat": {
++                    "image": {"aspectRatio": nearest_aspect_ratio(size)}
++                },
++            },
++        }
++        headers = {"x-goog-api-key": self._api_key}
++        try:
++            if self._client is not None:
++                response = self._client.post(self._url, json=body, headers=headers)
++            else:
++                response = httpx.post(
++                    self._url, json=body, headers=headers, timeout=self._timeout
++                )
++        except httpx.HTTPError as exc:
++            # The message never carries the request (it holds the key and prompt).
++            raise ImageProviderError(
++                f"Gemini request failed ({type(exc).__name__})"
++            ) from None
++
++        if response.status_code in (401, 403):
++            raise ImageConfigError("Gemini rejected the API key")
++        if response.status_code == 404:
++            raise ImageConfigError("Gemini does not know this IMAGE_MODEL")
++        if response.status_code >= 400:
++            retriable = response.status_code == 429 or response.status_code >= 500
++            raise ImageProviderError(
++                f"Gemini returned HTTP {response.status_code}", retriable=retriable
++            )
++        image = self._parse(response)
++        logger.info(
++            "Image generated",
++            extra={
++                "provider": self.name,
++                "size_bytes": len(image),
++                "latency_ms": int((time.monotonic() - started) * 1000),
++            },
++        )
++        return image
++
++    def _parse(self, response: httpx.Response) -> bytes:
++        try:
++            payload: Any = response.json()
++        except ValueError:
++            raise ImageProviderError(
++                "Gemini returned an unreadable response", retriable=False
++            ) from None
++        if not isinstance(payload, dict):
++            raise ImageProviderError(
++                "Gemini returned an unreadable response", retriable=False
++            )
++
++        candidates = payload.get("candidates")
++        candidate = candidates[0] if isinstance(candidates, list) and candidates else {}
++        content = candidate.get("content") if isinstance(candidate, dict) else None
++        parts = content.get("parts") if isinstance(content, dict) else None
++        for part in parts if isinstance(parts, list) else []:
++            if not isinstance(part, dict) or part.get("thought"):
++                continue
++            inline = part.get("inlineData") or part.get("inline_data")
++            if isinstance(inline, dict) and inline.get("data"):
++                return self._decode(inline["data"])
++
++        feedback = payload.get("promptFeedback")
++        blocked = isinstance(feedback, dict) and feedback.get("blockReason")
++        finish = candidate.get("finishReason") if isinstance(candidate, dict) else None
++        if blocked or finish not in (None, "STOP"):
++            raise ImageProviderError(
++                "Gemini declined to generate this image",
++                retriable=False,
++                code="image_refused",
++            )
++        raise ImageProviderError("Gemini returned no image")
++
++    @staticmethod
++    def _decode(data: object) -> bytes:
++        try:
++            # Line-wrapping whitespace is harmless; any other stray character
++            # must fail instead of being dropped (that would corrupt the image).
++            image = base64.b64decode("".join(str(data).split()), validate=True)
++        except (binascii.Error, ValueError):
++            raise ImageProviderError(
++                "Gemini returned an unreadable image", retriable=False
++            ) from None
++        if detect_image_mime(image) is None:
++            raise ImageProviderError(
++                "Gemini returned data that is not a PNG, JPEG or WebP image",
++                retriable=False,
++            )
++        return image
++
++
++# --------------------------------------------------------------------------
++# Registry
++# --------------------------------------------------------------------------
++
++
++def get_image_provider() -> ImageProvider:
++    """The provider selected by ``IMAGE_PROVIDER`` (settings are read per call)."""
++    settings = get_settings()
++    name = (settings.IMAGE_PROVIDER or "").strip().casefold()
++    if name == "fake":
++        return get_fake_image()
++    if name == "gemini":
++        return GeminiImage(settings.GEMINI_API_KEY, settings.IMAGE_MODEL)
++    raise ImageConfigError(f"Unknown IMAGE_PROVIDER '{settings.IMAGE_PROVIDER}'")
+diff --git a/backend/app/storage/__init__.py b/backend/app/storage/__init__.py
+index aa4b57a..6df82fe 100644
+--- a/backend/app/storage/__init__.py
++++ b/backend/app/storage/__init__.py
+@@ -1 +1,43 @@
+-"""Storage provider interfaces and implementations."""
++"""Storage backends (``ARCHITECTURE.md`` 6.13).
++
++:func:`get_storage_backend` picks the implementation from ``STORAGE_BACKEND``:
++
++* ``local`` (default): files under ``STORAGE_PATH`` (:class:`LocalStorage`).
++* ``s3``: planned (production), not implemented yet; selecting it is a
++  configuration error rather than a silent fallback to local files.
++"""
++
++from app.core.config import get_settings
++from app.storage.base import (
++    MAX_KEY_LENGTH,
++    InvalidStorageInputError,
++    StorageBackend,
++    StorageConfigError,
++    StorageError,
++    StorageIOError,
++    StorageNotFoundError,
++)
++from app.storage.local import LocalStorage
++
++__all__ = [
++    "MAX_KEY_LENGTH",
++    "InvalidStorageInputError",
++    "LocalStorage",
++    "StorageBackend",
++    "StorageConfigError",
++    "StorageError",
++    "StorageIOError",
++    "StorageNotFoundError",
++    "get_storage_backend",
++]
++
++
++def get_storage_backend() -> StorageBackend:
++    """The backend selected by ``STORAGE_BACKEND`` (settings are read per call)."""
++    settings = get_settings()
++    name = (settings.STORAGE_BACKEND or "").strip().casefold()
++    if name == "local":
++        return LocalStorage(settings.STORAGE_PATH)
++    if name == "s3":
++        raise StorageConfigError("STORAGE_BACKEND 's3' is not implemented yet")
++    raise StorageConfigError(f"Unknown STORAGE_BACKEND '{settings.STORAGE_BACKEND}'")
+diff --git a/backend/app/storage/base.py b/backend/app/storage/base.py
+new file mode 100644
+index 0000000..28007f5
+--- /dev/null
++++ b/backend/app/storage/base.py
+@@ -0,0 +1,189 @@
++"""Storage backend interface (``ARCHITECTURE.md`` 6.13).
++
++Generated media (images now, video/audio later) is stored through a
++:class:`StorageBackend`; nodes, services and publishers never touch the
++filesystem or an object-store SDK directly.
++
++The public methods validate their input once, here, and then call the
++``_put``/``_get``/``_url``/``_delete`` hooks of the concrete backend, so every
++backend (local today, S3-compatible later) rejects the same bad input in the
++same way. Keys are relative, ``/``-separated and made of safe segments
++(``ws/<id>/req/<id>/image.png``); absolute keys and path traversal are refused
++before a backend sees them.
++
++Errors derive from :class:`~app.core.errors.AppError` and carry ``retriable``
++like the other provider layers. Key and data contents are never put in error
++messages or logs.
++"""
++
++import re
++from abc import ABC, abstractmethod
++
++from app.core.errors import AppError
++
++MAX_KEY_LENGTH = 512
++
++# A segment starts with a letter or digit (no hidden files, no "." or ".."),
++# then letters, digits, dot, underscore or hyphen. No backslash, colon, space.
++_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
++# Device names Windows refuses as file names (with or without an extension).
++_WINDOWS_RESERVED = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$", re.I)
++_MIME = re.compile(
++    r"^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$"
++)
++
++
++class StorageError(AppError):
++    """Base class for storage layer failures."""
++
++    def __init__(
++        self,
++        message: str = "Storage failed",
++        code: str = "storage_error",
++        http_status: int = 500,
++        retriable: bool = True,
++        details: dict[str, str] | None = None,
++    ) -> None:
++        super().__init__(
++            code=code, message=message, http_status=http_status, details=details
++        )
++        self.retriable = retriable
++
++
++class StorageConfigError(StorageError):
++    """The storage backend is unknown or not usable (never retriable)."""
++
++    def __init__(self, message: str = "Storage is not configured") -> None:
++        super().__init__(
++            message=message,
++            code="storage_not_configured",
++            http_status=500,
++            retriable=False,
++        )
++
++
++class InvalidStorageInputError(StorageError):
++    """A key, mime type or payload was rejected (a caller bug, never retriable).
++
++    ``details`` holds the rejected ``field`` and a short ``reason``; it never
++    echoes the value.
++    """
++
++    def __init__(self, field: str, reason: str) -> None:
++        super().__init__(
++            message=f"Invalid storage {field}: {reason.replace('_', ' ')}",
++            code="invalid_storage_input",
++            http_status=400,
++            retriable=False,
++            details={"field": field, "reason": reason},
++        )
++
++
++class StorageNotFoundError(StorageError):
++    """No object is stored under the key."""
++
++    def __init__(self, message: str = "Stored object not found") -> None:
++        super().__init__(
++            message=message,
++            code="storage_object_not_found",
++            http_status=404,
++            retriable=False,
++        )
++
++
++class StorageIOError(StorageError):
++    """The backend could not read or write (disk full, permissions, network)."""
++
++    def __init__(self, message: str = "Storage I/O failed") -> None:
++        super().__init__(
++            message=message, code="storage_io_error", http_status=500, retriable=True
++        )
++
++
++def validate_key(key: object) -> str:
++    """Return ``key`` if it is a safe relative storage key, else raise."""
++    if not isinstance(key, str):
++        raise InvalidStorageInputError("key", "not_a_string")
++    if not key:
++        raise InvalidStorageInputError("key", "empty")
++    if len(key) > MAX_KEY_LENGTH:
++        raise InvalidStorageInputError("key", "too_long")
++    if key.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", key):
++        raise InvalidStorageInputError("key", "absolute")
++    for segment in key.split("/"):
++        if segment == "":
++            raise InvalidStorageInputError("key", "empty_segment")
++        if segment in (".", ".."):
++            raise InvalidStorageInputError("key", "dot_segment")
++        if not _SEGMENT.match(segment) or segment.endswith("."):
++            raise InvalidStorageInputError("key", "invalid_segment")
++        if _WINDOWS_RESERVED.match(segment):
++            raise InvalidStorageInputError("key", "reserved_name")
++    return key
++
++
++def validate_mime(mime: object) -> str:
++    """Return ``mime`` lower-cased if it looks like ``type/subtype``, else raise."""
++    if not isinstance(mime, str):
++        raise InvalidStorageInputError("mime", "not_a_string")
++    normalized = mime.strip().lower()
++    if not _MIME.match(normalized):
++        raise InvalidStorageInputError("mime", "malformed")
++    return normalized
++
++
++def validate_data(data: object) -> bytes:
++    """Return ``data`` as ``bytes``; it must be bytes-like and not empty."""
++    if not isinstance(data, bytes | bytearray | memoryview):
++        raise InvalidStorageInputError("data", "not_bytes")
++    payload = bytes(data)
++    if not payload:
++        raise InvalidStorageInputError("data", "empty")
++    return payload
++
++
++class StorageBackend(ABC):
++    """Interface every storage backend implements.
++
++    All four operations are idempotent: ``put`` on an existing key replaces
++    the object (a re-run job writes the same key again), ``delete`` of a
++    missing key is a no-op.
++    """
++
++    name: str
++
++    def put(self, key: str, data: bytes, mime: str) -> str:
++        """Store ``data`` under ``key`` and return the key (for ``media_assets``)."""
++        key = validate_key(key)
++        mime = validate_mime(mime)
++        payload = validate_data(data)
++        self._put(key, payload, mime)
++        return key
++
++    def get(self, key: str) -> bytes:
++        """Return the bytes stored under ``key`` (``StorageNotFoundError`` if none)."""
++        return self._get(validate_key(key))
++
++    def get_url(self, key: str) -> str:
++        """Return a locator for the object (``StorageNotFoundError`` if none).
++
++        The meaning depends on the backend: a ``file://`` URI for local
++        storage (not served over HTTP), a time-limited signed URL for S3.
++        """
++        return self._url(validate_key(key))
++
++    def delete(self, key: str) -> None:
++        """Remove the object; a missing key is not an error."""
++        self._delete(validate_key(key))
++
++    @abstractmethod
++    def _put(self, key: str, data: bytes, mime: str) -> None: ...
++
++    @abstractmethod
++    def _get(self, key: str) -> bytes: ...
++
++    @abstractmethod
++    def _url(self, key: str) -> str: ...
++
++    @abstractmethod
++    def _delete(self, key: str) -> None: ...
+diff --git a/backend/app/storage/local.py b/backend/app/storage/local.py
+new file mode 100644
+index 0000000..028ef34
+--- /dev/null
++++ b/backend/app/storage/local.py
+@@ -0,0 +1,90 @@
++"""Local filesystem storage backend (development and single-host deployments).
++
++Objects are files below one root directory (``STORAGE_PATH``). Writes are
++atomic (a temporary file in the target directory, then ``os.replace``) so a
++crash never leaves a half-written image behind. After the key has been
++validated, the resolved path is checked once more to be inside the root, which
++also stops a symlink inside the root from leading out of it.
++"""
++
++import os
++import tempfile
++from pathlib import Path
++
++from app.storage.base import (
++    InvalidStorageInputError,
++    StorageBackend,
++    StorageConfigError,
++    StorageIOError,
++    StorageNotFoundError,
++)
++
++
++class LocalStorage(StorageBackend):
++    """Store objects as files under ``root`` (created on the first ``put``)."""
++
++    name = "local"
++
++    def __init__(self, root: str | os.PathLike[str]) -> None:
++        if not str(root).strip():
++            raise StorageConfigError("STORAGE_PATH is empty")
++        self._root = Path(root).expanduser().resolve()
++
++    @property
++    def root(self) -> Path:
++        return self._root
++
++    def _path(self, key: str) -> Path:
++        path = (self._root / key).resolve()
++        if not path.is_relative_to(self._root):
++            raise InvalidStorageInputError("key", "outside_root")
++        return path
++
++    def _put(self, key: str, data: bytes, mime: str) -> None:
++        # ``mime`` is not stored: the media_assets row keeps it (DATABASE 4.9).
++        path = self._path(key)
++        tmp_name: str | None = None
++        try:
++            path.parent.mkdir(parents=True, exist_ok=True)
++            fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
++            with os.fdopen(fd, "wb") as handle:
++                handle.write(data)
++            os.replace(tmp_name, path)
++            tmp_name = None
++        except OSError as exc:
++            raise StorageIOError(
++                f"Local storage write failed ({type(exc).__name__})"
++            ) from None
++        finally:
++            if tmp_name is not None:
++                Path(tmp_name).unlink(missing_ok=True)
++
++    def _get(self, key: str) -> bytes:
++        path = self._path(key)
++        if not path.is_file():
++            raise StorageNotFoundError()
++        try:
++            return path.read_bytes()
++        except FileNotFoundError:
++            raise StorageNotFoundError() from None
++        except OSError as exc:
++            raise StorageIOError(
++                f"Local storage read failed ({type(exc).__name__})"
++            ) from None
++
++    def _url(self, key: str) -> str:
++        path = self._path(key)
++        if not path.is_file():
++            raise StorageNotFoundError()
++        return path.as_uri()
++
++    def _delete(self, key: str) -> None:
++        path = self._path(key)
++        if not path.is_file():
++            return
++        try:
++            path.unlink(missing_ok=True)
++        except OSError as exc:
++            raise StorageIOError(
++                f"Local storage delete failed ({type(exc).__name__})"
++            ) from None
+diff --git a/tests/unit/test_image_provider.py b/tests/unit/test_image_provider.py
+new file mode 100644
+index 0000000..d26ca3f
+--- /dev/null
++++ b/tests/unit/test_image_provider.py
+@@ -0,0 +1,880 @@
++"""Tests for ``app.providers.image`` (B2-09): fake, header readers, Gemini, registry."""
++
++import base64
++import json
++import logging
++import struct
++import zlib
++from collections.abc import Callable
++from typing import Any
++
++import httpx
++import pytest
++from app.core.config import get_settings
++from app.providers.image import (
++    DEFAULT_IMAGE_SIZE,
++    GEMINI_ASPECT_RATIOS,
++    MAX_DIMENSION,
++    PNG_SIGNATURE,
++    FakeImage,
++    GeminiImage,
++    ImageConfigError,
++    ImageInfo,
++    ImageProvider,
++    ImageProviderError,
++    InvalidImageRequestError,
++    build_png,
++    detect_image_mime,
++    get_fake_image,
++    get_image_provider,
++    nearest_aspect_ratio,
++    read_image_info,
++)
++
++# --------------------------------------------------------------------------
++# Helpers: independent PNG parsing and hand-made JPEG / WebP headers
++# --------------------------------------------------------------------------
++
++
++def png_chunks(data: bytes) -> list[tuple[bytes, bytes]]:
++    """Split a PNG into (type, payload), verifying every CRC."""
++    assert data.startswith(PNG_SIGNATURE)
++    pos, chunks = len(PNG_SIGNATURE), []
++    while pos < len(data):
++        (length,) = struct.unpack(">I", data[pos : pos + 4])
++        kind = data[pos + 4 : pos + 8]
++        payload = data[pos + 8 : pos + 8 + length]
++        (crc,) = struct.unpack(">I", data[pos + 8 + length : pos + 12 + length])
++        assert crc == zlib.crc32(kind + payload) & 0xFFFFFFFF, f"bad CRC in {kind!r}"
++        chunks.append((kind, payload))
++        pos += 12 + length
++    assert pos == len(data)
++    return chunks
++
++
++def jpeg(width: int, height: int, sof: int = 0xC0, before: bytes = b"") -> bytes:
++    app0 = b"\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
++    frame = (
++        bytes([0xFF, sof])
++        + b"\x00\x11\x08"
++        + struct.pack(">HH", height, width)
++        + b"\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01"
++    )
++    return b"\xff\xd8" + before + app0 + frame + b"\xff\xd9"
++
++
++def riff(kind: bytes, body: bytes) -> bytes:
++    chunk = kind + struct.pack("<I", len(body)) + body
++    return b"RIFF" + struct.pack("<I", 4 + len(chunk)) + b"WEBP" + chunk
++
++
++def webp_vp8x(width: int, height: int) -> bytes:
++    body = b"\x00" * 4 + (width - 1).to_bytes(3, "little")
++    return riff(b"VP8X", body + (height - 1).to_bytes(3, "little"))
++
++
++def webp_vp8(width: int, height: int) -> bytes:
++    body = b"\x30\x01\x00" + b"\x9d\x01\x2a" + struct.pack("<HH", width, height)
++    return riff(b"VP8 ", body)
++
++
++def webp_vp8l(width: int, height: int) -> bytes:
++    bits = (width - 1) | ((height - 1) << 14)
++    return riff(b"VP8L", b"\x2f" + struct.pack("<I", bits))
++
++
++# --------------------------------------------------------------------------
++# build_png and FakeImage
++# --------------------------------------------------------------------------
++
++
++@pytest.mark.parametrize(
++    "size", [(1, 1), (7, 13), (64, 64), (1080, 1350), (4096, 4096)]
++)
++def test_build_png_is_a_structurally_valid_png_of_the_requested_size(
++    size: tuple[int, int],
++) -> None:
++    width, height = size
++    data = build_png(width, height, (10, 20, 30))
++
++    chunks = png_chunks(data)  # signature, framing and every CRC
++
++    assert [kind for kind, _ in chunks] == [b"IHDR", b"PLTE", b"IDAT", b"IEND"]
++    ihdr = dict(chunks)[b"IHDR"]
++    assert struct.unpack(">IIBBBBB", ihdr) == (width, height, 1, 3, 0, 0, 0)
++    assert dict(chunks)[b"PLTE"][:3] == bytes([10, 20, 30])
++    pixels = zlib.decompress(dict(chunks)[b"IDAT"])
++    row = 1 + (width + 7) // 8
++    assert len(pixels) == row * height
++    assert all(pixels[r * row] == 0 for r in range(height))  # filter type "none"
++    assert not any(
++        pixels[r * row + 1 : (r + 1) * row] != b"\x00" * (row - 1)
++        for r in range(height)
++    )  # every pixel uses palette entry 0
++
++
++def test_the_fake_returns_a_png_with_the_correct_mime_and_size() -> None:
++    data = FakeImage().generate("a red apple", (1080, 1350))
++
++    assert data.startswith(PNG_SIGNATURE)
++    assert detect_image_mime(data) == "image/png"
++    assert read_image_info(data) == ImageInfo("image/png", 1080, 1350)
++
++
++def test_the_fake_image_is_small_even_for_a_large_request() -> None:
++    assert len(FakeImage().generate("x", (MAX_DIMENSION, MAX_DIMENSION))) < 10_000
++
++
++def test_the_default_size_is_used_when_none_is_given() -> None:
++    fake = FakeImage()
++
++    data = fake.generate("x")
++
++    assert DEFAULT_IMAGE_SIZE == (1024, 1024)
++    assert read_image_info(data) == ImageInfo("image/png", 1024, 1024)
++    assert fake.calls == [("x", (1024, 1024))]
++
++
++def test_the_fake_is_deterministic_per_prompt() -> None:
++    fake = FakeImage()
++
++    assert fake.generate("same", (8, 8)) == fake.generate("same", (8, 8))
++    assert fake.generate("one", (8, 8)) != fake.generate("two", (8, 8))
++
++
++def test_the_fake_records_the_cleaned_prompt_and_size() -> None:
++    fake = FakeImage()
++
++    fake.generate("  a cat \n", (10, 20))
++
++    assert fake.calls == [("a cat", (10, 20))]
++
++
++def test_queued_images_are_returned_once_in_order_then_the_default() -> None:
++    fake = FakeImage()
++    fake.queue(b"broken", b"also broken")
++
++    assert fake.generate("x", (4, 4)) == b"broken"
++    assert fake.generate("x", (4, 4)) == b"also broken"
++    assert fake.generate("x", (4, 4)).startswith(PNG_SIGNATURE)
++
++
++def test_fail_next_raises_that_many_times_then_recovers() -> None:
++    fake = FakeImage()
++    fake.fail_next(2, retriable=False)
++
++    for _ in range(2):
++        with pytest.raises(ImageProviderError) as caught:
++            fake.generate("x")
++        assert caught.value.retriable is False
++        assert caught.value.code == "image_provider_error"
++    assert fake.generate("x").startswith(PNG_SIGNATURE)
++    assert len(fake.calls) == 3  # failed calls are recorded too
++
++
++def test_fail_next_is_retriable_by_default() -> None:
++    fake = FakeImage()
++    fake.fail_next()
++
++    with pytest.raises(ImageProviderError) as caught:
++        fake.generate("x")
++
++    assert caught.value.retriable is True
++    assert caught.value.http_status == 502
++
++
++def test_reset_clears_calls_queue_and_failures() -> None:
++    fake = FakeImage()
++    fake.queue(b"x")
++    fake.fail_next(3, retriable=False)
++    fake.calls.append(("p", (1, 1)))
++
++    fake.reset()
++
++    assert fake.calls == []
++    assert fake.generate("p", (2, 2)).startswith(PNG_SIGNATURE)
++    fake.fail_next()
++    fake.reset()
++    assert fake.generate("p", (2, 2)).startswith(PNG_SIGNATURE)
++
++
++# --------------------------------------------------------------------------
++# Request validation (shared by every provider)
++# --------------------------------------------------------------------------
++
++
++@pytest.mark.parametrize("prompt", ["", "   ", "\n\t", None, 5, b"x", ["x"]])
++def test_an_empty_or_non_text_prompt_is_rejected(prompt: Any) -> None:
++    fake = FakeImage()
++
++    with pytest.raises(InvalidImageRequestError) as caught:
++        fake.generate(prompt)
++
++    assert caught.value.code == "invalid_image_request"
++    assert caught.value.http_status == 400
++    assert caught.value.retriable is False
++    assert fake.calls == []  # the provider never saw it
++
++
++@pytest.mark.parametrize(
++    "size",
++    [
++        (0, 100),
++        (100, 0),
++        (-1, 100),
++        (MAX_DIMENSION + 1, 100),
++        (100, MAX_DIMENSION + 1),
++        (100,),
++        (100, 100, 3),
++        [100, 100],
++        (100.0, 100),
++        ("100", 100),
++        (True, 100),
++        None,
++        1024,
++    ],
++)
++def test_a_bad_size_is_rejected(size: Any) -> None:
++    fake = FakeImage()
++
++    with pytest.raises(InvalidImageRequestError):
++        fake.generate("x", size)
++
++    assert fake.calls == []
++
++
++@pytest.mark.parametrize("size", [(1, 1), (MAX_DIMENSION, MAX_DIMENSION), (4096, 1)])
++def test_boundary_sizes_are_accepted(size: tuple[int, int]) -> None:
++    assert read_image_info(FakeImage().generate("x", size)) is not None
++
++
++def test_the_interface_cannot_be_instantiated() -> None:
++    with pytest.raises(TypeError):
++        ImageProvider()  # type: ignore[abstract]
++
++
++# --------------------------------------------------------------------------
++# detect_image_mime / read_image_info
++# --------------------------------------------------------------------------
++
++
++def test_mime_detection_by_signature() -> None:
++    assert detect_image_mime(build_png(1, 1, (0, 0, 0))) == "image/png"
++    assert detect_image_mime(jpeg(1, 1)) == "image/jpeg"
++    assert detect_image_mime(webp_vp8x(1, 1)) == "image/webp"
++    for other in (
++        b"",
++        b"GIF89a....",
++        b"%PDF-1.7",
++        b"RIFF\x00\x00\x00\x00WAVE",
++        b"\xff\xd8",
++    ):
++        assert detect_image_mime(other) is None
++
++
++def test_png_size_is_read_from_ihdr() -> None:
++    assert read_image_info(build_png(320, 200, (1, 2, 3))) == ImageInfo(
++        "image/png", 320, 200
++    )
++
++
++@pytest.mark.parametrize("sof", [0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xCF])
++def test_jpeg_size_is_read_from_any_start_of_frame_marker(sof: int) -> None:
++    assert read_image_info(jpeg(640, 480, sof=sof)) == ImageInfo("image/jpeg", 640, 480)
++
++
++def test_jpeg_tables_are_not_mistaken_for_a_frame() -> None:
++    dht = b"\xff\xc4\x00\x05\x00\x00\x00"  # define Huffman table: not a SOF
++    dac = b"\xff\xcc\x00\x04\x00\x00"  # arithmetic conditioning
++    dqt = b"\xff\xdb\x00\x04\x00\x00"
++
++    data = jpeg(800, 600, before=dht + dac + dqt)
++
++    assert read_image_info(data) == ImageInfo("image/jpeg", 800, 600)
++
++
++def test_jpeg_fill_bytes_and_standalone_markers_are_skipped() -> None:
++    data = jpeg(50, 40, before=b"\xff\xff\xff\x01")
++
++    assert read_image_info(data) == ImageInfo("image/jpeg", 50, 40)
++
++
++def test_a_jpeg_without_a_frame_header_is_not_readable() -> None:
++    assert read_image_info(b"\xff\xd8\xff\xda\x00\x02\xff\xd9") is None  # scan first
++    assert read_image_info(b"\xff\xd8\xff\xd9") is None
++    assert read_image_info(b"\xff\xd8\xff\xe0\x00\x01") is None  # length < 2
++    assert read_image_info(b"\xff\xd8\xffnot a marker stream") is None
++    assert read_image_info(b"\xff\xd8\xff\x00\x00\x00\x00\x00") is None
++    # a valid APP0 segment followed by a byte that is not a marker
++    assert read_image_info(b"\xff\xd8\xff\xe0\x00\x04\x00\x00\x12\x34\x56\x78") is None
++
++
++def test_jpeg_scan_data_is_never_searched_for_a_frame_header() -> None:
++    frame = (
++        b"\xff\xc0\x00\x11\x08\x00\x0a\x00\x0a\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01"
++    )
++    scan_first = b"\xff\xd8\xff\xda\x00\x02" + frame  # a "frame" inside entropy data
++
++    assert read_image_info(scan_first) is None
++    assert read_image_info(b"\xff\xd8\xff\xd9" + frame) is None  # nothing after EOI
++
++
++def test_a_truncated_jpeg_frame_header_is_not_readable() -> None:
++    assert read_image_info(jpeg(10, 10)[:15]) is None
++    assert read_image_info(b"\xff\xd8\xff\xc0\x00\x11\x08\x00") is None
++
++
++@pytest.mark.parametrize(
++    ("builder", "label"),
++    [(webp_vp8x, "VP8X"), (webp_vp8, "VP8"), (webp_vp8l, "VP8L")],
++)
++def test_webp_size_is_read_for_every_container_variant(
++    builder: Callable[[int, int], bytes], label: str
++) -> None:
++    assert read_image_info(builder(1024, 768)) == ImageInfo("image/webp", 1024, 768), (
++        label
++    )
++
++
++def test_webp_edges() -> None:
++    assert read_image_info(webp_vp8x(1, 1)) == ImageInfo("image/webp", 1, 1)
++    assert read_image_info(webp_vp8x(16384, 16384)) == ImageInfo(
++        "image/webp", 16384, 16384
++    )
++    assert read_image_info(webp_vp8l(16384, 1)) == ImageInfo("image/webp", 16384, 1)
++    # lossy frames keep only 14 bits of the 16-bit field (the top two are scaling)
++    lossy = riff(
++        b"VP8 ", b"\x30\x01\x00\x9d\x01\x2a" + struct.pack("<HH", 0xC000 | 99, 7)
++    )
++    assert read_image_info(lossy) == ImageInfo("image/webp", 99, 7)
++
++
++def test_unreadable_webp_is_none() -> None:
++    assert (
++        read_image_info(riff(b"VP8 ", b"\x30\x01\x00\x00\x00\x00" + b"\x00" * 4))
++        is None
++    )
++    assert read_image_info(riff(b"VP8L", b"\x00" + b"\x00" * 4)) is None  # no 0x2F
++    assert read_image_info(riff(b"ANIM", b"\x00" * 16)) is None
++    assert read_image_info(webp_vp8x(10, 10)[:25]) is None
++    assert read_image_info(webp_vp8(10, 10)[:25]) is None
++    assert read_image_info(webp_vp8l(10, 10)[:22]) is None
++    assert read_image_info(b"RIFF\x00\x00\x00\x00WEBP") is None
++
++
++def test_unreadable_png_and_other_formats_are_none() -> None:
++    good = build_png(10, 10, (0, 0, 0))
++    assert read_image_info(good[:23]) is None  # truncated IHDR
++    assert read_image_info(PNG_SIGNATURE) is None
++    assert read_image_info(good[:12] + b"IDAT" + good[16:]) is None  # not IHDR first
++    zero = good[:16] + struct.pack(">II", 0, 5) + good[24:]
++    assert read_image_info(zero) is None  # a zero dimension is not an image
++    assert read_image_info(b"") is None
++    assert read_image_info(b"GIF89a" + b"\x00" * 20) is None
++    assert read_image_info(b"plain text, not an image at all") is None
++
++
++# --------------------------------------------------------------------------
++# nearest_aspect_ratio
++# --------------------------------------------------------------------------
++
++
++@pytest.mark.parametrize(
++    ("size", "ratio"),
++    [
++        ((1024, 1024), "1:1"),
++        ((1080, 1350), "4:5"),
++        ((1350, 1080), "5:4"),
++        ((1920, 1080), "16:9"),
++        ((1080, 1920), "9:16"),
++        ((1200, 800), "3:2"),
++        ((800, 1200), "2:3"),
++        ((1000, 1000), "1:1"),
++        ((1, 1), "1:1"),
++        ((4096, 1), "21:9"),  # the widest supported ratio
++        ((1, 4096), "9:16"),  # the tallest supported ratio
++    ],
++)
++def test_the_closest_supported_aspect_ratio_is_chosen(
++    size: tuple[int, int], ratio: str
++) -> None:
++    assert nearest_aspect_ratio(size) == ratio
++    assert ratio in GEMINI_ASPECT_RATIOS
++
++
++# --------------------------------------------------------------------------
++# GeminiImage (HTTP mocked with httpx.MockTransport)
++# --------------------------------------------------------------------------
++
++API_KEY = "AIza-test-key-123"
++MODEL = "gemini-test-image"
++PNG_BYTES = build_png(16, 16, (200, 10, 10))
++
++
++def b64(data: bytes) -> str:
++    return base64.b64encode(data).decode()
++
++
++def image_reply(data: bytes = PNG_BYTES, **extra: Any) -> dict[str, Any]:
++    return {
++        "candidates": [
++            {
++                "content": {
++                    "parts": [
++                        {"text": "Here is your image."},
++                        {"inlineData": {"mimeType": "image/png", "data": b64(data)}},
++                    ]
++                },
++                "finishReason": "STOP",
++            }
++        ],
++        **extra,
++    }
++
++
++def gemini(
++    handler: Callable[[httpx.Request], httpx.Response],
++    *,
++    model: str = MODEL,
++) -> tuple[GeminiImage, list[httpx.Request]]:
++    seen: list[httpx.Request] = []
++
++    def recording(request: httpx.Request) -> httpx.Response:
++        seen.append(request)
++        return handler(request)
++
++    client = httpx.Client(transport=httpx.MockTransport(recording))
++    return GeminiImage(API_KEY, model, client=client), seen
++
++
++def reply(status: int = 200, payload: Any = None, **kwargs: Any) -> Callable[..., Any]:
++    return lambda _request: httpx.Response(
++        status, json=image_reply() if payload is None else payload, **kwargs
++    )
++
++
++def test_gemini_returns_the_decoded_image_and_sends_the_documented_request() -> None:
++    provider, seen = gemini(reply())
++
++    data = provider.generate("  A mountain at dawn ", (1080, 1350))
++
++    assert data == PNG_BYTES
++    (request,) = seen
++    assert request.method == "POST"
++    assert str(request.url) == (
++        f"https://generativelanguage.googleapis.com/v1/models/{MODEL}:generateContent"
++    )
++    assert request.headers["x-goog-api-key"] == API_KEY
++    assert "authorization" not in request.headers
++    assert API_KEY not in str(request.url)  # the key is never in the URL
++    assert json.loads(request.content) == {
++        "contents": [{"parts": [{"text": "A mountain at dawn"}]}],
++        "generationConfig": {
++            "responseModalities": ["IMAGE"],
++            "responseFormat": {"image": {"aspectRatio": "4:5"}},
++        },
++    }
++
++
++@pytest.mark.parametrize(
++    ("size", "ratio"),
++    [((1920, 1080), "16:9"), ((1080, 1920), "9:16"), ((10, 10), "1:1")],
++)
++def test_gemini_asks_for_the_aspect_ratio_closest_to_the_size(
++    size: tuple[int, int], ratio: str
++) -> None:
++    provider, seen = gemini(reply())
++
++    provider.generate("x", size)
++
++    body = json.loads(seen[0].content)
++    assert body["generationConfig"]["responseFormat"]["image"]["aspectRatio"] == ratio
++
++
++def test_gemini_skips_thought_images_and_takes_the_first_real_one() -> None:
++    thought = build_png(8, 8, (1, 1, 1))
++    final = build_png(9, 9, (2, 2, 2))
++    payload = {
++        "candidates": [
++            {
++                "content": {
++                    "parts": [
++                        {"inlineData": {"data": b64(thought)}, "thought": True},
++                        {"text": "thinking...", "thought": True},
++                        {"inlineData": {"mimeType": "image/png", "data": b64(final)}},
++                        {"inlineData": {"data": b64(PNG_BYTES)}},
++                    ]
++                }
++            }
++        ]
++    }
++    provider, _ = gemini(reply(payload=payload))
++
++    assert provider.generate("x") == final
++
++
++def test_gemini_accepts_the_snake_case_spelling_of_inline_data() -> None:
++    payload = {
++        "candidates": [
++            {"content": {"parts": [{"inline_data": {"data": b64(PNG_BYTES)}}]}}
++        ]
++    }
++    provider, _ = gemini(reply(payload=payload))
++
++    assert provider.generate("x") == PNG_BYTES
++
++
++def test_gemini_returns_a_jpeg_or_webp_when_the_model_does() -> None:
++    for data in (jpeg(100, 50), webp_vp8x(100, 50)):
++        provider, _ = gemini(reply(payload=image_reply(data)))
++        assert provider.generate("x") == data
++
++
++def test_gemini_uses_the_injected_base_url_and_strips_a_trailing_slash() -> None:
++    seen: list[httpx.Request] = []
++
++    def handler(request: httpx.Request) -> httpx.Response:
++        seen.append(request)
++        return httpx.Response(200, json=image_reply())
++
++    client = httpx.Client(transport=httpx.MockTransport(handler))
++    GeminiImage(
++        API_KEY, MODEL, base_url="https://proxy.test/v9/", client=client
++    ).generate("x")
++
++    assert str(seen[0].url) == f"https://proxy.test/v9/models/{MODEL}:generateContent"
++
++
++def test_gemini_without_an_injected_client_uses_httpx_post(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    calls: list[dict[str, Any]] = []
++
++    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
++        calls.append({"url": url, **kwargs})
++        return httpx.Response(200, json=image_reply())
++
++    monkeypatch.setattr("app.providers.image.httpx.post", fake_post)
++
++    assert GeminiImage(API_KEY, MODEL, timeout=7.0).generate("x") == PNG_BYTES
++    assert calls[0]["timeout"] == 7.0
++    assert calls[0]["headers"] == {"x-goog-api-key": API_KEY}
++
++
++@pytest.mark.parametrize(
++    ("api_key", "model", "text"),
++    [
++        (None, MODEL, "GEMINI_API_KEY"),
++        ("", MODEL, "GEMINI_API_KEY"),
++        (API_KEY, None, "IMAGE_MODEL is not set"),
++        (API_KEY, "   ", "IMAGE_MODEL is not set"),
++        (API_KEY, "models/x", "invalid characters"),
++        (API_KEY, "x?key=1", "invalid characters"),
++        (API_KEY, "x:generateContent", "invalid characters"),
++        (API_KEY, "../x", "invalid characters"),
++        (API_KEY, "-x", "invalid characters"),
++    ],
++)
++def test_gemini_needs_a_key_and_a_safe_model_name(
++    api_key: str | None, model: str | None, text: str
++) -> None:
++    with pytest.raises(ImageConfigError) as caught:
++        GeminiImage(api_key, model)
++
++    assert text in caught.value.message
++    assert caught.value.code == "image_not_configured"
++    assert caught.value.retriable is False
++
++
++def test_a_model_name_is_trimmed() -> None:
++    assert GeminiImage(API_KEY, f"  {MODEL}  ").model == MODEL
++
++
++@pytest.mark.parametrize("status", [401, 403])
++def test_a_rejected_key_is_a_config_error(status: int) -> None:
++    provider, _ = gemini(reply(status, {"error": {"message": f"bad {API_KEY}"}}))
++
++    with pytest.raises(ImageConfigError) as caught:
++        provider.generate("x")
++
++    assert "API key" in caught.value.message
++    assert API_KEY not in caught.value.message
++
++
++def test_an_unknown_model_is_a_config_error() -> None:
++    provider, _ = gemini(reply(404, {"error": {"message": "models/x not found"}}))
++
++    with pytest.raises(ImageConfigError) as caught:
++        provider.generate("x")
++
++    assert "IMAGE_MODEL" in caught.value.message
++    assert caught.value.retriable is False
++
++
++@pytest.mark.parametrize(
++    ("status", "retriable"),
++    [(400, False), (402, False), (422, False), (429, True), (500, True), (503, True)],
++)
++def test_http_errors_are_retriable_only_when_trying_again_can_help(
++    status: int, retriable: bool
++) -> None:
++    provider, _ = gemini(reply(status, {"error": {"message": "echo: secret prompt"}}))
++
++    with pytest.raises(ImageProviderError) as caught:
++        provider.generate("secret prompt")
++
++    assert caught.value.retriable is retriable
++    assert str(status) in caught.value.message
++    assert "secret prompt" not in caught.value.message  # the body is never echoed
++
++
++def test_a_network_failure_is_retriable_and_leaks_nothing() -> None:
++    def refuse(_request: httpx.Request) -> httpx.Response:
++        raise httpx.ConnectError(f"cannot reach host with {API_KEY} and secret prompt")
++
++    provider, _ = gemini(refuse)
++
++    with pytest.raises(ImageProviderError) as caught:
++        provider.generate("secret prompt")
++
++    assert caught.value.retriable is True
++    assert "ConnectError" in caught.value.message
++    assert API_KEY not in caught.value.message
++    assert "secret prompt" not in caught.value.message
++    assert caught.value.__suppress_context__ is True  # raised ``from None``
++
++
++def test_a_timeout_is_retriable() -> None:
++    def slow(_request: httpx.Request) -> httpx.Response:
++        raise httpx.ReadTimeout("too slow")
++
++    provider, _ = gemini(slow)
++
++    with pytest.raises(ImageProviderError) as caught:
++        provider.generate("x")
++
++    assert caught.value.retriable is True
++
++
++@pytest.mark.parametrize(
++    "body", [b"<html>oops</html>", b"", b"[1, 2]", b'"text"', b"null"]
++)
++def test_an_unreadable_reply_is_not_retriable(body: bytes) -> None:
++    provider, _ = gemini(lambda _r: httpx.Response(200, content=body))
++
++    with pytest.raises(ImageProviderError) as caught:
++        provider.generate("x")
++
++    assert caught.value.retriable is False
++    assert "unreadable" in caught.value.message
++
++
++@pytest.mark.parametrize(
++    "payload",
++    [
++        {"candidates": [{"content": {"parts": [{"text": "I cannot draw."}]}}]},
++        {
++            "candidates": [
++                {"content": {"parts": [{"text": "no"}]}, "finishReason": "STOP"}
++            ]
++        },
++        {"candidates": [{"content": {}}]},
++        {"candidates": [{}]},
++        {"candidates": []},
++        {"candidates": "nope"},
++        {},
++        {"candidates": [{"content": {"parts": [{"inlineData": {}}, "text", 5]}}]},
++    ],
++)
++def test_a_reply_without_an_image_can_be_retried(payload: dict[str, Any]) -> None:
++    provider, _ = gemini(reply(payload=payload))
++
++    with pytest.raises(ImageProviderError) as caught:
++        provider.generate("x")
++
++    assert caught.value.retriable is True
++    assert caught.value.code == "image_provider_error"
++    assert "no image" in caught.value.message
++
++
++@pytest.mark.parametrize(
++    "payload",
++    [
++        {"promptFeedback": {"blockReason": "SAFETY"}},
++        {"candidates": [], "promptFeedback": {"blockReason": "PROHIBITED_CONTENT"}},
++        {"candidates": [{"finishReason": "IMAGE_SAFETY"}]},
++        {"candidates": [{"content": {"parts": []}, "finishReason": "SAFETY"}]},
++        {"candidates": [{"finishReason": "NO_IMAGE"}]},
++    ],
++)
++def test_a_refusal_is_reported_as_such_and_is_not_retriable(
++    payload: dict[str, Any],
++) -> None:
++    provider, _ = gemini(reply(payload=payload))
++
++    with pytest.raises(ImageProviderError) as caught:
++        provider.generate("x")
++
++    assert caught.value.code == "image_refused"
++    assert caught.value.retriable is False
++
++
++def test_an_image_wins_over_a_finish_reason() -> None:
++    payload = image_reply()
++    payload["candidates"][0]["finishReason"] = "MAX_TOKENS"
++    provider, _ = gemini(reply(payload=payload))
++
++    assert provider.generate("x") == PNG_BYTES
++
++
++@pytest.mark.parametrize("data", ["***not base64***", "abc", 12345, "AAAA\n" + "A" * 3])
++def test_invalid_base64_is_not_retriable(data: Any) -> None:
++    payload = {"candidates": [{"content": {"parts": [{"inlineData": {"data": data}}]}}]}
++    provider, _ = gemini(reply(payload=payload))
++
++    with pytest.raises(ImageProviderError) as caught:
++        provider.generate("x")
++
++    assert caught.value.retriable is False
++    assert "unreadable image" in caught.value.message
++
++
++def test_line_wrapped_base64_is_accepted() -> None:
++    wrapped = "\n".join(
++        b64(PNG_BYTES)[i : i + 20] for i in range(0, len(b64(PNG_BYTES)), 20)
++    )
++    payload = {
++        "candidates": [{"content": {"parts": [{"inlineData": {"data": wrapped}}]}}]
++    }
++    provider, _ = gemini(reply(payload=payload))
++
++    assert provider.generate("x") == PNG_BYTES
++
++
++def test_a_stray_character_in_the_base64_is_an_error_not_silently_dropped() -> None:
++    clean = b64(PNG_BYTES)
++    corrupt = clean[:20] + "*" + clean[20:]  # lenient decoding would drop the "*"
++    payload = {
++        "candidates": [{"content": {"parts": [{"inlineData": {"data": corrupt}}]}}]
++    }
++    provider, _ = gemini(reply(payload=payload))
++
++    with pytest.raises(ImageProviderError) as caught:
++        provider.generate("x")
++
++    assert "unreadable image" in caught.value.message
++    assert caught.value.retriable is False
++
++
++def test_data_that_is_not_an_image_is_not_retriable() -> None:
++    provider, _ = gemini(reply(payload=image_reply(b"%PDF-1.7 not an image")))
++
++    with pytest.raises(ImageProviderError) as caught:
++        provider.generate("x")
++
++    assert caught.value.retriable is False
++    assert "not a PNG, JPEG or WebP" in caught.value.message
++
++
++def test_gemini_logs_a_summary_without_the_prompt_or_the_key(
++    caplog: pytest.LogCaptureFixture,
++) -> None:
++    provider, _ = gemini(reply())
++
++    with caplog.at_level(logging.DEBUG):
++        provider.generate("a very secret prompt")
++
++    logged = " ".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
++    assert "Image generated" in logged
++    assert "a very secret prompt" not in logged
++    assert API_KEY not in logged
++
++
++def test_a_failure_logs_nothing_sensitive(caplog: pytest.LogCaptureFixture) -> None:
++    provider, _ = gemini(reply(500, {"error": "boom"}))
++
++    with caplog.at_level(logging.DEBUG), pytest.raises(ImageProviderError):
++        provider.generate("a very secret prompt")
++
++    logged = " ".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
++    assert "a very secret prompt" not in logged
++    assert API_KEY not in logged
++
++
++def test_gemini_validates_the_request_before_calling_the_network() -> None:
++    provider, seen = gemini(reply())
++
++    with pytest.raises(InvalidImageRequestError):
++        provider.generate("", (10, 10))
++    with pytest.raises(InvalidImageRequestError):
++        provider.generate("x", (0, 10))
++
++    assert seen == []
++
++
++# --------------------------------------------------------------------------
++# Registry
++# --------------------------------------------------------------------------
++
++
++@pytest.fixture
++def env(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
++    def set_env(**values: str) -> None:
++        for key, value in values.items():
++            monkeypatch.setenv(key, value)
++        get_settings.cache_clear()
++
++    yield set_env
++    get_settings.cache_clear()
++
++
++def test_the_registry_returns_the_shared_fake(env: Any) -> None:
++    env(IMAGE_PROVIDER="fake")
++
++    assert get_image_provider() is get_fake_image()
++
++
++def test_the_registry_is_case_insensitive(env: Any) -> None:
++    env(IMAGE_PROVIDER=" FAKE ")
++
++    assert get_image_provider() is get_fake_image()
++
++
++def test_the_registry_builds_gemini_from_the_settings(env: Any) -> None:
++    env(IMAGE_PROVIDER="gemini", GEMINI_API_KEY=API_KEY, IMAGE_MODEL=MODEL)
++
++    provider = get_image_provider()
++
++    assert isinstance(provider, GeminiImage)
++    assert provider.model == MODEL
++
++
++@pytest.mark.parametrize(
++    ("key", "model", "text"),
++    [("", MODEL, "GEMINI_API_KEY"), (API_KEY, "", "IMAGE_MODEL")],
++)
++def test_gemini_without_key_or_model_in_settings_is_a_config_error(
++    env: Any, key: str, model: str, text: str
++) -> None:
++    env(IMAGE_PROVIDER="gemini", GEMINI_API_KEY=key, IMAGE_MODEL=model)
++
++    with pytest.raises(ImageConfigError) as caught:
++        get_image_provider()
++
++    assert text in caught.value.message
++
++
++def test_an_unknown_provider_is_a_config_error(env: Any) -> None:
++    env(IMAGE_PROVIDER="midjourney")
++
++    with pytest.raises(ImageConfigError) as caught:
++        get_image_provider()
++
++    assert "midjourney" in caught.value.message
++
++
++def test_the_image_model_setting_defaults_to_none_and_no_name_is_hard_coded() -> None:
++    from app.core.config import Settings
++
++    assert Settings(_env_file=None).IMAGE_MODEL is None
++    assert Settings(_env_file=None).IMAGE_PROVIDER == "fake"
+diff --git a/tests/unit/test_storage.py b/tests/unit/test_storage.py
+new file mode 100644
+index 0000000..eb48189
+--- /dev/null
++++ b/tests/unit/test_storage.py
+@@ -0,0 +1,544 @@
++"""Tests for ``app.storage`` (B2-09): validation, LocalStorage, registry."""
++
++import os
++from pathlib import Path
++from typing import Any
++
++import pytest
++from app.core.config import get_settings
++from app.storage import (
++    MAX_KEY_LENGTH,
++    InvalidStorageInputError,
++    LocalStorage,
++    StorageBackend,
++    StorageConfigError,
++    StorageIOError,
++    StorageNotFoundError,
++    get_storage_backend,
++)
++
++PNG = b"\x89PNG\r\n\x1a\nfake-bytes"
++
++
++@pytest.fixture
++def store(tmp_path: Path) -> LocalStorage:
++    return LocalStorage(tmp_path / "media")
++
++
++def reason(caught: pytest.ExceptionInfo[InvalidStorageInputError]) -> str:
++    return caught.value.details["reason"]  # type: ignore[call-overload,no-any-return]
++
++
++# --------------------------------------------------------------------------
++# put / get / get_url / delete
++# --------------------------------------------------------------------------
++
++
++def test_put_get_delete_roundtrip(store: LocalStorage) -> None:
++    key = "ws/1/req/2/image.png"
++
++    assert store.put(key, PNG, "image/png") == key
++    assert store.get(key) == PNG
++
++    store.delete(key)
++
++    with pytest.raises(StorageNotFoundError):
++        store.get(key)
++
++
++def test_put_creates_missing_directories_lazily(tmp_path: Path) -> None:
++    root = tmp_path / "does" / "not" / "exist"
++    store = LocalStorage(root)
++    assert not root.exists()  # constructing touches nothing
++
++    store.put("a/b/c.png", PNG, "image/png")
++
++    assert (root / "a" / "b" / "c.png").read_bytes() == PNG
++
++
++def test_put_on_an_existing_key_replaces_the_object(store: LocalStorage) -> None:
++    store.put("x.png", b"old", "image/png")
++    store.put("x.png", b"new", "image/png")
++
++    assert store.get("x.png") == b"new"
++
++
++def test_put_leaves_no_temporary_files(store: LocalStorage) -> None:
++    store.put("d/x.png", PNG, "image/png")
++    store.put("d/x.png", PNG, "image/png")
++
++    assert sorted(p.name for p in (store.root / "d").iterdir()) == ["x.png"]
++
++
++def test_delete_of_a_missing_key_is_a_no_op(store: LocalStorage) -> None:
++    store.delete("never/stored.png")
++    store.put("keep.png", PNG, "image/png")
++    store.delete("never/stored.png")
++
++    assert store.get("keep.png") == PNG
++
++
++def test_delete_removes_only_that_object(store: LocalStorage) -> None:
++    store.put("d/a.png", b"a", "image/png")
++    store.put("d/b.png", b"b", "image/png")
++
++    store.delete("d/a.png")
++
++    assert store.get("d/b.png") == b"b"
++    with pytest.raises(StorageNotFoundError):
++        store.get("d/a.png")
++
++
++def test_get_of_a_missing_key_is_not_found(store: LocalStorage) -> None:
++    with pytest.raises(StorageNotFoundError) as caught:
++        store.get("nope.png")
++
++    assert caught.value.http_status == 404
++    assert caught.value.code == "storage_object_not_found"
++    assert caught.value.retriable is False
++
++
++def test_get_url_is_a_file_uri_of_the_stored_object(store: LocalStorage) -> None:
++    store.put("d/a.png", PNG, "image/png")
++
++    url = store.get_url("d/a.png")
++
++    assert url.startswith("file://")
++    assert url.endswith("/d/a.png")
++    assert url == (store.root / "d" / "a.png").as_uri()
++
++
++def test_get_url_of_a_missing_key_is_not_found(store: LocalStorage) -> None:
++    with pytest.raises(StorageNotFoundError):
++        store.get_url("nope.png")
++
++
++def test_a_directory_is_not_an_object(store: LocalStorage) -> None:
++    store.put("d/a.png", PNG, "image/png")
++
++    with pytest.raises(StorageNotFoundError):
++        store.get("d")
++    with pytest.raises(StorageNotFoundError):
++        store.get_url("d")
++    store.delete("d")  # no-op, the directory and its content survive
++    assert store.get("d/a.png") == PNG
++
++
++# --------------------------------------------------------------------------
++# Key validation
++# --------------------------------------------------------------------------
++
++
++@pytest.mark.parametrize(
++    ("key", "expected"),
++    [
++        ("", "empty"),
++        ("/etc/passwd", "absolute"),
++        ("\\windows\\x", "absolute"),
++        ("C:/x.png", "absolute"),
++        ("c:\\x.png", "absolute"),
++        ("../x.png", "dot_segment"),
++        ("a/../b.png", "dot_segment"),
++        ("a/./b.png", "dot_segment"),
++        ("a//b.png", "empty_segment"),
++        ("a/b/", "empty_segment"),
++        ("a\\b.png", "invalid_segment"),
++        (".hidden", "invalid_segment"),
++        ("a/.tmp-1", "invalid_segment"),
++        ("a b.png", "invalid_segment"),
++        ("a:b.png", "absolute"),  # a Windows drive-relative path
++        ("ab:c.png", "invalid_segment"),
++        ("a\x00b.png", "invalid_segment"),
++        ("a/b.", "invalid_segment"),
++        ("caf\u00e9.png", "invalid_segment"),
++        ("con", "reserved_name"),
++        ("a/NUL.txt", "reserved_name"),
++        ("Com1.png", "reserved_name"),
++        ("x" * (MAX_KEY_LENGTH + 1), "too_long"),
++    ],
++)
++def test_unsafe_keys_are_rejected_by_every_operation(
++    store: LocalStorage, key: str, expected: str
++) -> None:
++    for call in (
++        lambda: store.put(key, PNG, "image/png"),
++        lambda: store.get(key),
++        lambda: store.get_url(key),
++        lambda: store.delete(key),
++    ):
++        with pytest.raises(InvalidStorageInputError) as caught:
++            call()
++        assert reason(caught) == expected
++        assert caught.value.http_status == 400
++        assert caught.value.code == "invalid_storage_input"
++        assert caught.value.retriable is False
++
++
++@pytest.mark.parametrize("key", [None, 5, b"a.png", ["a.png"]])
++def test_a_key_that_is_not_a_string_is_rejected(store: LocalStorage, key: Any) -> None:
++    with pytest.raises(InvalidStorageInputError) as caught:
++        store.get(key)
++
++    assert reason(caught) == "not_a_string"
++
++
++@pytest.mark.parametrize(
++    "key",
++    [
++        "a.png",
++        "ws/0b9e3a5e-7f0c-4c0a-9d8e-2f1f0a7d1c11/req/1/image-1.v2.png",
++        "A_b-C.9",
++        "a..b.png",  # ".." inside a name is not a traversal
++    ],
++)
++def test_normal_keys_are_accepted(store: LocalStorage, key: str) -> None:
++    assert store.put(key, PNG, "image/png") == key
++    assert store.get(key) == PNG
++
++
++def test_a_key_of_exactly_the_maximum_length_is_accepted(store: LocalStorage) -> None:
++    # Four segments (file names stay under the 255 limit), 512 characters in all.
++    key = "/".join(["x" * 127] * 3 + ["x" * 128])
++    assert len(key) == MAX_KEY_LENGTH
++
++    assert store.put(key, PNG, "image/png") == key
++    assert store.get(key) == PNG
++
++
++def test_a_rejected_traversal_writes_nothing_outside_the_root(
++    tmp_path: Path, store: LocalStorage
++) -> None:
++    with pytest.raises(InvalidStorageInputError):
++        store.put("../outside.png", PNG, "image/png")
++
++    assert not (tmp_path / "outside.png").exists()
++    assert not store.root.exists()  # not even the root was created
++
++
++def test_the_error_never_echoes_the_key(store: LocalStorage) -> None:
++    with pytest.raises(InvalidStorageInputError) as caught:
++        store.put("../secret-customer-name.png", PNG, "image/png")
++
++    assert "secret-customer-name" not in caught.value.message
++    assert "secret-customer-name" not in str(caught.value.details)
++
++
++def test_a_symlink_inside_the_root_cannot_lead_out_of_it(
++    tmp_path: Path, store: LocalStorage
++) -> None:
++    outside = tmp_path / "outside"
++    outside.mkdir()
++    (outside / "secret.png").write_bytes(b"secret")
++    store.root.mkdir()
++    try:
++        os.symlink(outside, store.root / "link", target_is_directory=True)
++    except (OSError, NotImplementedError):
++        pytest.skip("symlinks are not available here")
++
++    for call in (
++        lambda: store.put("link/new.png", PNG, "image/png"),
++        lambda: store.get("link/secret.png"),
++        lambda: store.get_url("link/secret.png"),
++        lambda: store.delete("link/secret.png"),
++    ):
++        with pytest.raises(InvalidStorageInputError) as caught:
++            call()
++        assert reason(caught) == "outside_root"
++
++    assert (outside / "secret.png").read_bytes() == b"secret"
++    assert not (outside / "new.png").exists()
++
++
++# --------------------------------------------------------------------------
++# Mime and data validation
++# --------------------------------------------------------------------------
++
++
++@pytest.mark.parametrize(
++    "mime", ["", "png", "image/", "/png", "image/png/x", "image png", "image/p ng"]
++)
++def test_a_malformed_mime_type_is_rejected(store: LocalStorage, mime: str) -> None:
++    with pytest.raises(InvalidStorageInputError) as caught:
++        store.put("a.png", PNG, mime)
++
++    assert reason(caught) == "malformed"
++    assert not store.root.exists()
++
++
++def test_a_mime_type_that_is_not_a_string_is_rejected(store: LocalStorage) -> None:
++    with pytest.raises(InvalidStorageInputError) as caught:
++        store.put("a.png", PNG, None)  # type: ignore[arg-type]
++
++    assert reason(caught) == "not_a_string"
++
++
++@pytest.mark.parametrize(
++    "mime", ["image/png", "IMAGE/PNG", " image/jpeg ", "video/mp4"]
++)
++def test_ordinary_mime_types_are_accepted(store: LocalStorage, mime: str) -> None:
++    assert store.put("a.bin", PNG, mime) == "a.bin"
++
++
++@pytest.mark.parametrize("data", ["text", None, 5, ["a"]])
++def test_data_that_is_not_bytes_is_rejected(store: LocalStorage, data: Any) -> None:
++    with pytest.raises(InvalidStorageInputError) as caught:
++        store.put("a.png", data, "image/png")
++
++    assert reason(caught) == "not_bytes"
++
++
++def test_empty_data_is_rejected(store: LocalStorage) -> None:
++    with pytest.raises(InvalidStorageInputError) as caught:
++        store.put("a.png", b"", "image/png")
++
++    assert reason(caught) == "empty"
++
++
++def test_bytearray_and_memoryview_are_stored_as_bytes(store: LocalStorage) -> None:
++    store.put("a.png", bytearray(b"abc"), "image/png")
++    store.put("b.png", memoryview(b"xyz"), "image/png")
++
++    assert store.get("a.png") == b"abc"
++    assert store.get("b.png") == b"xyz"
++    assert isinstance(store.get("a.png"), bytes)
++
++
++# --------------------------------------------------------------------------
++# Failures of the file system
++# --------------------------------------------------------------------------
++
++
++def test_a_file_in_the_way_of_a_directory_is_an_io_error(store: LocalStorage) -> None:
++    store.put("a", PNG, "image/png")
++
++    with pytest.raises(StorageIOError) as caught:
++        store.put("a/b.png", PNG, "image/png")
++
++    assert caught.value.retriable is True
++    assert caught.value.code == "storage_io_error"
++    assert store.get("a") == PNG
++
++
++def test_putting_over_a_directory_is_an_io_error_and_cleans_up(
++    store: LocalStorage,
++) -> None:
++    store.put("d/a.png", PNG, "image/png")
++
++    with pytest.raises(StorageIOError):
++        store.put("d", PNG, "image/png")
++
++    assert sorted(p.name for p in store.root.iterdir()) == ["d"]  # no .tmp-* left
++    assert store.get("d/a.png") == PNG
++
++
++def test_a_failed_replace_keeps_the_old_object_and_removes_the_temp_file(
++    store: LocalStorage, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    store.put("x.png", b"old", "image/png")
++
++    def boom(*_args: Any, **_kwargs: Any) -> None:
++        raise PermissionError("denied")
++
++    monkeypatch.setattr("app.storage.local.os.replace", boom)
++
++    with pytest.raises(StorageIOError) as caught:
++        store.put("x.png", b"new", "image/png")
++
++    monkeypatch.undo()
++    assert "PermissionError" in caught.value.message
++    assert store.get("x.png") == b"old"
++    assert sorted(p.name for p in store.root.iterdir()) == ["x.png"]
++
++
++def test_a_read_error_is_an_io_error(
++    store: LocalStorage, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    store.put("x.png", PNG, "image/png")
++
++    def boom(_self: Path) -> bytes:
++        raise PermissionError("denied")
++
++    monkeypatch.setattr(Path, "read_bytes", boom)
++
++    with pytest.raises(StorageIOError) as caught:
++        store.get("x.png")
++
++    assert caught.value.retriable is True
++
++
++def test_an_object_deleted_during_a_read_is_not_found(
++    store: LocalStorage, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    store.put("x.png", PNG, "image/png")
++
++    def vanished(_self: Path) -> bytes:
++        raise FileNotFoundError
++
++    monkeypatch.setattr(Path, "read_bytes", vanished)
++
++    with pytest.raises(StorageNotFoundError):
++        store.get("x.png")
++
++
++def test_a_delete_error_is_an_io_error(
++    store: LocalStorage, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    store.put("x.png", PNG, "image/png")
++
++    def boom(_self: Path, missing_ok: bool = False) -> None:
++        raise PermissionError("denied")
++
++    monkeypatch.setattr(Path, "unlink", boom)
++
++    with pytest.raises(StorageIOError):
++        store.delete("x.png")
++
++
++def test_io_error_messages_carry_no_path(
++    store: LocalStorage, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    store.put("x.png", PNG, "image/png")
++    monkeypatch.setattr(
++        Path, "read_bytes", lambda _s: (_ for _ in ()).throw(OSError(str(store.root)))
++    )
++
++    with pytest.raises(StorageIOError) as caught:
++        store.get("x.png")
++
++    assert str(store.root) not in caught.value.message
++
++
++# --------------------------------------------------------------------------
++# LocalStorage construction and the shared base class
++# --------------------------------------------------------------------------
++
++
++@pytest.mark.parametrize("root", ["", "   "])
++def test_an_empty_root_is_a_config_error(root: str) -> None:
++    with pytest.raises(StorageConfigError) as caught:
++        LocalStorage(root)
++
++    assert caught.value.code == "storage_not_configured"
++    assert caught.value.retriable is False
++
++
++def test_a_relative_root_is_resolved_when_the_backend_is_built(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    monkeypatch.chdir(tmp_path)
++    store = LocalStorage("./storage")
++    monkeypatch.chdir("/")
++
++    store.put("a.png", PNG, "image/png")
++
++    assert (tmp_path / "storage" / "a.png").read_bytes() == PNG
++
++
++def test_the_interface_cannot_be_instantiated() -> None:
++    with pytest.raises(TypeError):
++        StorageBackend()  # type: ignore[abstract]
++
++
++def test_a_new_backend_gets_the_same_validation_for_free() -> None:
++    seen: list[tuple[str, bytes, str]] = []
++
++    class Memory(StorageBackend):
++        name = "memory"
++
++        def _put(self, key: str, data: bytes, mime: str) -> None:
++            seen.append((key, data, mime))
++
++        def _get(self, key: str) -> bytes:
++            return b""
++
++        def _url(self, key: str) -> str:
++            return key
++
++        def _delete(self, key: str) -> None:
++            seen.append((key, b"", "deleted"))
++
++    backend = Memory()
++
++    assert backend.put("a/b.png", bytearray(b"x"), " Image/PNG ") == "a/b.png"
++    assert seen == [("a/b.png", b"x", "image/png")]
++    for bad in (
++        lambda: backend.put("../a", b"x", "image/png"),
++        lambda: backend.put("a", b"x", "nope"),
++        lambda: backend.put("a", b"", "image/png"),
++        lambda: backend.delete("/a"),
++    ):
++        with pytest.raises(InvalidStorageInputError):
++            bad()
++    assert len(seen) == 1  # the hooks never saw the bad input
++
++
++# --------------------------------------------------------------------------
++# Registry
++# --------------------------------------------------------------------------
++
++
++@pytest.fixture
++def env(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
++    def set_env(**values: str) -> None:
++        for key, value in values.items():
++            monkeypatch.setenv(key, value)
++        get_settings.cache_clear()
++
++    yield set_env
++    get_settings.cache_clear()
++
++
++def test_the_registry_builds_local_storage_from_the_settings(
++    env: Any, tmp_path: Path
++) -> None:
++    env(STORAGE_BACKEND="local", STORAGE_PATH=str(tmp_path / "m"))
++
++    backend = get_storage_backend()
++
++    assert isinstance(backend, LocalStorage)
++    assert backend.root == (tmp_path / "m").resolve()
++
++
++def test_the_registry_is_case_insensitive(env: Any, tmp_path: Path) -> None:
++    env(STORAGE_BACKEND=" LOCAL ", STORAGE_PATH=str(tmp_path))
++
++    assert isinstance(get_storage_backend(), LocalStorage)
++
++
++def test_the_registry_default_is_local(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    monkeypatch.delenv("STORAGE_BACKEND", raising=False)
++    monkeypatch.delenv("STORAGE_PATH", raising=False)
++    monkeypatch.chdir(tmp_path)  # a developer's .env must not leak in
++    get_settings.cache_clear()
++    try:
++        assert isinstance(get_storage_backend(), LocalStorage)
++    finally:
++        get_settings.cache_clear()
++
++
++def test_s3_is_a_config_error_until_it_exists(env: Any) -> None:
++    env(STORAGE_BACKEND="s3")
++
++    with pytest.raises(StorageConfigError) as caught:
++        get_storage_backend()
++
++    assert "not implemented" in caught.value.message
++    assert caught.value.retriable is False
++
++
++def test_an_unknown_backend_is_a_config_error(env: Any) -> None:
++    env(STORAGE_BACKEND="ftp")
++
++    with pytest.raises(StorageConfigError) as caught:
++        get_storage_backend()
++
++    assert "ftp" in caught.value.message
++
++
++def test_an_empty_storage_path_in_settings_is_a_config_error(env: Any) -> None:
++    env(STORAGE_BACKEND="local", STORAGE_PATH="")
++
++    with pytest.raises(StorageConfigError):
++        get_storage_backend()
+-- 
+2.43.0
+
