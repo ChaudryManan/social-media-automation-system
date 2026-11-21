@@ -56,7 +56,7 @@ Goal: run the full post-generation graph from a CLI with a fake LLM, including r
   **Done when:** works with fake search; real provider behind `SEARCH_PROVIDER` documented in `.env.example`. **Dep:** B2-03.
 - [x] **B2-07 strategist node** — per-platform strategy from plan + research + workspace brand voice.
   **Done when:** strategy keyed by each target platform; brand voice appears in the prompt input (test). **Dep:** B2-05, B2-06. Refs: FR-5.1.
-- [ ] **B2-08 Router and main graph skeleton** — `content_router` conditional edge, `graph.py` with Postgres checkpointer, placeholder subgraphs.
+- [x] **B2-08 Router and main graph skeleton** — `content_router` conditional edge, `graph.py` with Postgres checkpointer, placeholder subgraphs.
   **Done when:** invoking with `content_type=post` reaches the post placeholder and `video` the video placeholder. **Dep:** B2-07. Refs: FR-5.2.
 - [ ] **B2-09 Storage and image provider** — `StorageBackend` (local), `providers/image.py` (`FakeImage` returns a valid small PNG, one real provider by config).
   **Done when:** put/get/delete test; fake image generates bytes with correct mime. **Dep:** B1-03.
