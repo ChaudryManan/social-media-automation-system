@@ -7,11 +7,11 @@
 
 ## 1. NEXT ACTION (one precise step)
 
-> **Start task `B2-12` (dev runner) in `TASKS.md`. `B2-01` to `B2-11` are done.**
-> Read `ARCHITECTURE.md` 6.1, 6.15 and `PROGRESS.md` section 9 first. Create `backend/app/agents/run.py` so `python -m app.agents.run --topic "..." --type post --platforms facebook,instagram` builds the graph with the real post subgraph (`make_post_subgraph()`), the reviewer and an in-memory checkpointer, runs it with the fake LLM, fake search and fake image provider by default (a flag for the real ones), until the first interrupt or the end, and prints the draft per platform plus the review. Notes: `build_graph(post_subgraph=...)` does not default to the real subgraph (decision B2-10-8), so the runner passes it; image storage needs `STORAGE_BACKEND`/`STORAGE_PATH` (use a temp directory for the fake run); `state["request_id"]` is required by the image step (generate a UUID); the fake LLM has no built-in replies for the post flow, so the runner needs scripted replies per role (reuse the idea of `PostLLM` in `tests/unit/test_post_subgraph.py`, which answers by system-prompt role and platform). Done when (TASKS): the command prints a draft with the fake LLM and exits 0 with no network. Do not start B2-13 in the same change.
+> **Start task `B2-13` (graph test suite) in `TASKS.md`. `B2-01` to `B2-12` are done.**
+> Read `ARCHITECTURE.md` 6.1, 6.3, 6.15, 6.16 first. TASKS asks for one suite covering: the retry path, the escalation path, the review fix loop, the router in both directions (post and video) and multi-platform drafts, all green with no network. Much of this already exists spread over `test_graph.py`, `test_checked_node.py`, `test_post_subgraph.py` and `test_reviewer_node.py`: **inventory first, then add what is missing** instead of duplicating (for example a single end-to-end file `tests/unit/test_graph_flows.py` that runs the whole graph through `app.agents.run.run()` / `compile_graph` for each scenario, plus a video-routing test that reaches the placeholder `video_subgraph`, and a Postgres-checkpointer variant of the escalation/resume test in `tests/integration/` that skips without a database). `app/agents/fake_flow.py::post_flow_replies` and `PostLLM` in `test_post_subgraph.py` are the two ways of scripting a whole run; prefer one of them. Done when (TASKS): all green, no network. Do not start B3 in the same change; B2 is then finished and the Phase B2 line in section 3 becomes Done.
 > **Before coding, fix the repo first (see section 8, "storage files never committed"): `git add backend/app/storage/base.py backend/app/storage/local.py` and commit the `.gitignore` fix.**
 
-Last updated: 2026-11-22 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B2-09: storage and image provider` (B2-10 and B2-11 are uncommitted: apply the zips, see section 9)
+Last updated: 2026-11-22 · Last agent: Claude (chat, via cloned repo) · Branch: `main` · Last commit: `B2-09: storage and image provider` (B2-10, B2-11 and B2-12 are uncommitted: apply the zips in order, see section 9)
 
 ## 2. How to resume (any agent)
 
@@ -26,7 +26,7 @@ Last updated: 2026-11-22 · Last agent: Claude (chat, via cloned repo) · Branch
 |---|---|---|---|
 | Docs | PRD, ARCHITECTURE, DATABASE, TASKS, AGENTS, PROGRESS, AGENT_SPECS | Done | 7 / 7 |
 | B1 | Foundation: auth, roles, workspaces, limits | Done | 11 / 11 |
-| B2 | Agent engine (post flow) | In progress | 11 / 13 |
+| B2 | Agent engine (post flow) | In progress | 12 / 13 |
 | B3 | Core pipeline end-to-end (Backend Core Complete) | Not started | 0 / 19 |
 | B4 | Video flow | Not started | 0 / 10 |
 | B5 | Remaining backend (library, admin, more platforms) | Not started | 0 / 13 |
@@ -44,6 +44,7 @@ Milestones:
 
 ## 5. Recently completed (newest first, keep last ~10)
 
+- 2026-11-22 — B2-12 completed: dev runner. `backend/app/agents/run.py` (`python -m app.agents.run --topic ... --type post --platforms ...`, text or `--json` output, exit codes 0/1/2), `backend/app/agents/fake_flow.py` (`post_flow_replies`: role-based fake LLM replies for a whole post run). Verified with the real command offline (7 steps, drafts for facebook and instagram, review ok). +25 tests in `tests/unit/test_run.py` (arguments, state, whole run, JSON, rejected request, human escalation, zero review cycles, storage dir, real provider not scripted, a subprocess run of the module, the fake replies); both modules 100% line and branch.
 - 2026-11-22 — B2-11 completed: reviewer and `route_after_review`. `backend/app/agents/nodes/reviewer.py` (`ReviewIssue`, `ReviewResult`, `rule_issues`, `make_reviewer_node`, `make_review_gate`, `route_after_review`, `route_after_content`, re-entry table helpers); `post/subgraph.py` now honours `rerun_from` (writer: writer + hashtag, image only if flagged; image only; hashtag only); `build_graph(reviewer=, max_review_cycles=, with_review=True)` wires post/video subgraph -> reviewer -> `review_gate` -> end / planner / strategist / content_router. Older graph tests use `with_review=False`. +139 reviewer tests and +21 subgraph/loop tests (fix loop, writer fix, strategist fix, cycle cap with warnings, aborted step skips review); reviewer module 100% line and branch; 12 deliberate breakages, 12 caught.
 - 2026-11-21 — B2-10 completed: post subgraph. `backend/app/agents/post/` (`common.py`; `writer.py`: `WriterOutput`, agent, rule checks, judge, `make_writer_node`; `image.py`: `ImagePrompt`, `parse_aspect_ratio`, `size_for_aspect_ratio`, `choose_aspect_ratio`, agent, rule checks that read the stored bytes, prompt-vs-caption judge, `make_image_node`; `hashtag.py`: `HashtagOutput`, agent, rule-only checks, `make_hashtag_node`; `subgraph.py`: `make_post_subgraph`). Step keys `writer`, `image`, `hashtag`; each handles every distinct target platform in one attempt (FR-5.5) and merges into `drafts[platform]` (`caption`, `title`, `hashtags`, `media`). New shared fixtures `fake_image` and `media_root` in `tests/conftest.py`. +260 tests (82 writer, 53 hashtag, 114 image, 11 subgraph incl. a full main-graph run and an escalation inside the subgraph resumed with `Command`); the five new modules 100% line and branch covered; 16 deliberate breakages, 15 caught (the survivor is an equivalent mutant). No new dependency, no migration, no new setting.
 - 2026-11-21 — B2-09 completed: storage and image provider. `backend/app/storage/` (`base.py`: `StorageBackend` ABC with shared validation, `StorageError` family, `validate_key/mime/data`; `local.py`: `LocalStorage` with atomic writes and a resolved-path check; `__init__.py`: `get_storage_backend`), `backend/app/providers/image.py` (`ImageProvider`, `FakeImage`, `build_png`, `GeminiImage` over `httpx`, `get_image_provider`, `ImageError` family, `detect_image_mime`, `read_image_info`, `nearest_aspect_ratio`). New setting `IMAGE_MODEL` (`core/config.py`, `.env.example`, ARCHITECTURE env block). +215 tests (1519 passed, 0 skipped with real PostgreSQL 16 and Redis; baseline 1304); all four new modules 100% line and branch covered; 68 deliberate breakages, all caught after 3 gaps were closed (1 dead guard removed). No new dependency, no migration. New task B3-19 (shared media volume in Compose).
@@ -81,6 +82,8 @@ Milestones:
 
 | Date | ID | Decision | Why | Docs updated |
 |---|---|---|---|---|
+| 2026-11-22 | B2-12-1 | The runner scripts the fake LLM only when `LLM_PROVIDER` is `fake`; there is no `--live` flag, the provider choice stays in the settings. The scripted replies live in `app/agents/fake_flow.py` (answering by role line) rather than in test code. | "Works offline with `LLM_PROVIDER=fake`" (TASKS) and one source of truth for providers. | ARCHITECTURE 6.16 |
+| 2026-11-22 | B2-12-2 | `--type` accepts only `post` for now. Images go to the configured storage (`./storage` by default, git-ignored by `/storage/`); `--storage-dir` overrides. Exit code 2 means "paused for a human". | The video flow is B4; nothing to run for it yet. | ARCHITECTURE 6.16 |
 | 2026-11-22 | B2-11-1 | The reviewer always calls the LLM and merges it with the in-code platform-fit issues (no short-circuit); `ok` is recomputed from the issues. It is a checked node whose check validates only the shape of the review. | One cycle can fix everything at once; scores are always real, never made up; a model that says `ok` while the rules disagree cannot slip through. | ARCHITECTURE 6.15, AGENT_SPECS 5 |
 | 2026-11-22 | B2-11-2 | `route_after_review` needs a state update, so it is a `review_gate` node plus a pure routing function. Routes: `ok` -> `END` (B3 replaces it with `human_approval`), `planner`, `strategist`, `content` (-> `content_router`). Planner re-entry reruns researcher and strategist. | Conditional edges cannot write state. | ARCHITECTURE 6.15 |
 | 2026-11-22 | B2-11-3 | Gate: `retries` reset to 0 for every node that reruns **and** every flagged node; `feedback[node]` = that node's hints joined (500 chars); `status` set to `generating`. At the cap the errors become `review.warnings` (`"<platform or all>: <message>"`), `review.issues` is left as it was. `max_review_cycles` is a parameter (default 2, 0 = never loop, negative refused). | AGENT_SPECS 5.2 and TASKS B2-11. | ARCHITECTURE 6.15 |
@@ -216,6 +219,15 @@ Template — copy for each session:
 - Next: <the precise next action — also copied to section 1>
 - Watch out: <gotchas, flaky tests, decisions the next agent must know>
 ```
+
+### 2026-11-22 — Claude (chat, cloned the public repo) — B2-12
+- Did: dev runner and scripted offline replies.
+  - New: `backend/app/agents/run.py`, `backend/app/agents/fake_flow.py`, `tests/unit/test_run.py` (25).
+  - Docs: `TASKS.md` B2-12 ticked, `ARCHITECTURE.md` 6.16, this file.
+- State: sandbox without PostgreSQL: unit tests green except the storage tests that need your real `storage/base.py` and `local.py` (section 8); `ruff check` clean; runner and fake replies 100% line and branch. The real command printed drafts for facebook and instagram offline. **B2-12 builds on B2-10 and B2-11: apply them first.** Nothing committed.
+- Left undone on purpose: video runs (B4), a real-provider smoke test (needs your keys: set `LLM_PROVIDER`, `IMAGE_PROVIDER`, `SEARCH_PROVIDER` and the API keys in `.env`, then run the same command).
+- Next: `B2-13` (graph test suite); see section 1.
+- Watch out: on Windows run `python -m app.agents.run ...` from the repo root inside the venv; the subprocess test copies `os.environ` so it works there too. The first real-provider run will show whether `min_short_side=1024` and the writer's length window suit the real models (section 8).
 
 ### 2026-11-22 — Claude (chat, cloned the public repo) — B2-11
 - Did: reviewer, review gate, routing, post-subgraph re-entry, graph wiring.
