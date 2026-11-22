@@ -132,6 +132,9 @@ class Run:
 
     def __init__(self, **parts: Any) -> None:
         self.search = FakeSearch()
+        parts.setdefault(
+            "with_review", False
+        )  # these tests cover the steps before B2-11
         self.planner = parts.pop("planner", None) or make_planner_node()
         self.researcher = parts.pop("researcher", None) or make_researcher_node(
             search_provider=lambda: self.search

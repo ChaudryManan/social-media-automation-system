@@ -246,6 +246,8 @@ class ReviewResult(BaseModel):
   - Cycle cap reached: continue to `human_approval` with the remaining issues as warnings (the human decides).
 - A `policy` error that cannot be fixed (e.g. unsafe topic) escalates to `needs_attention`.
 
+**Implementation notes (B2-11):** see `ARCHITECTURE.md` 6.15. Mechanical platform-fit checks run in code and are merged with the LLM's issues (rule issues first); `ok` is recomputed from the issues, not taken from the model. The reviewer is retried only when the review is malformed. Unfixable policy errors escalate when `scores.policy < 0.3`. A planner re-entry reruns the researcher too.
+
 ### 5.2 Re-entry dependency table
 | `rerun_from` | Nodes rerun |
 |---|---|

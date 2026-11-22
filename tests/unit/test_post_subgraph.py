@@ -15,6 +15,11 @@ from app.agents.post import (
     make_post_subgraph,
     make_writer_node,
 )
+from app.agents.post.subgraph import (
+    route_after_image,
+    route_after_writer,
+    route_post_entry,
+)
 from app.agents.state import GraphState
 from app.providers.image import FakeImage, build_png, read_image_info
 from app.providers.search import FakeSearch
@@ -70,6 +75,31 @@ def state(**changes: Any) -> GraphState:
     return base  # type: ignore[return-value]
 
 
+def review_reply(*issues: dict[str, Any], **changes: Any) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "ok": not any(i["severity"] == "error" for i in issues),
+        "scores": dict.fromkeys(
+            ("quality", "accuracy", "policy", "platform_fit", "brand_voice"), 0.9
+        ),
+        "issues": list(issues),
+        "warnings": [],
+    }
+    data.update(changes)
+    return data
+
+
+def review_issue(node: str, **changes: Any) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "severity": "error",
+        "platform": "instagram",
+        "responsible_node": node,
+        "message": f"{node} problem",
+        "fix_hint": f"fix the {node}",
+    }
+    data.update(changes)
+    return data
+
+
 class PostLLM:
     """Answers each post-flow prompt by role, whatever the call order."""
 
@@ -92,6 +122,7 @@ class PostLLM:
             "style_notes": "calm greens",
         }
         self.tags: Any = lambda platform, n: {"hashtags": TAGS[platform]}
+        self.review: Any = lambda n: review_reply()
         self.seen: dict[str, int] = {}
         fake_llm.set_default(self._answer)
 
@@ -99,6 +130,9 @@ class PostLLM:
         system, user = call.messages[0].content, call.messages[1].content
         if "quality judge" in system:
             return JUDGE
+        if "final reviewer" in system:
+            self.seen["review"] = self.seen.get("review", 0) + 1
+            return self.review(self.seen["review"])  # type: ignore[no-any-return]
         role = (
             "caption"
             if "copywriter" in system
@@ -366,3 +400,262 @@ def test_the_main_graph_runs_from_the_request_to_the_drafts(
         draft = result["drafts"][platform]
         assert draft["caption"] and draft["hashtags"] and len(draft["media"]) == 1
     assert not any(result["retries"].values())
+
+
+# --------------------------------------------------------------------------
+# Re-entry routing (rerun_from, AGENT_SPECS 5.2) and the review loop
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("rerun_from", "entry"),
+    [
+        (None, "writer"),
+        ("writer", "writer"),
+        ("planner", "writer"),
+        ("strategist", "writer"),
+        ("image", "image"),
+        ("hashtag", "hashtag"),
+    ],
+)
+def test_the_entry_step_follows_rerun_from(rerun_from: Any, entry: str) -> None:
+    assert route_post_entry(state(rerun_from=rerun_from)) == entry
+
+
+@pytest.mark.parametrize(
+    ("rerun_from", "feedback", "expected"),
+    [
+        (None, None, "image"),
+        ("planner", None, "image"),
+        ("writer", None, "hashtag"),
+        ("writer", {"image": None}, "hashtag"),
+        ("writer", {"image": "Make it simpler."}, "image"),
+    ],
+)
+def test_after_a_writer_re_entry_the_image_is_kept_unless_flagged(
+    rerun_from: Any, feedback: Any, expected: str
+) -> None:
+    base = state(rerun_from=rerun_from)
+    if feedback is not None:
+        base["feedback"] = feedback
+
+    assert route_after_writer(base) == expected
+
+
+def test_an_image_only_re_entry_stops_after_the_image() -> None:
+    assert route_after_image(state(rerun_from="image")) == "end"
+    assert route_after_image(state(rerun_from="writer")) == "hashtag"
+    assert route_after_image(state()) == "hashtag"
+
+
+def full_state() -> GraphState:
+    """A finished first pass: drafts with caption, hashtags and a stored image."""
+    return state(
+        drafts={
+            p: {
+                "caption": CAPTION,
+                "hashtags": TAGS[p],
+                "media": [
+                    {
+                        "type": "image",
+                        "storage_key": f"requests/r1/{p}/image-1.png",
+                        "meta": {"alt_text": "tea"},
+                    }
+                ],
+            }
+            for p in ("facebook", "instagram")
+        }
+    )
+
+
+def roles(fake_llm: FakeScript) -> list[str]:
+    names = {
+        "copywriter": "writer",
+        "art director": "image",
+        "hashtag specialist": "hashtag",
+    }
+    return [
+        next(v for k, v in names.items() if k in c.messages[0].content)
+        for c in fake_llm.calls
+        if any(k in c.messages[0].content for k in names)
+    ]
+
+
+def test_a_hashtag_re_entry_runs_only_the_hashtag_step(fake_llm: FakeScript) -> None:
+    PostLLM(fake_llm)
+    base = full_state()
+    base["rerun_from"] = "hashtag"
+    base["feedback"] = {"hashtag": "Use 5 tags."}
+
+    result = Run().run(base)
+
+    assert set(roles(fake_llm)) == {"hashtag"}
+    assert "Use 5 tags." in fake_llm.calls[0].messages[1].content
+    assert result["drafts"]["instagram"]["caption"] == CAPTION  # kept
+
+
+def test_an_image_re_entry_runs_only_the_image_step(
+    fake_llm: FakeScript, fake_image: FakeImage
+) -> None:
+    PostLLM(fake_llm)
+    base = full_state()
+    base["rerun_from"] = "image"
+    base["feedback"] = {"image": "Make it simpler."}
+
+    result = Run().run(base)
+
+    assert set(roles(fake_llm)) == {"image"}
+    assert len(fake_image.calls) == 2
+    assert result["drafts"]["instagram"]["hashtags"] == TAGS["instagram"]  # kept
+    assert result["drafts"]["instagram"]["media"][0]["storage_key"].endswith(
+        "/image-1.png"
+    )
+
+
+def test_a_writer_re_entry_reruns_writer_and_hashtag_but_not_the_image(
+    fake_llm: FakeScript, fake_image: FakeImage
+) -> None:
+    PostLLM(fake_llm)
+    base = full_state()
+    base["rerun_from"] = "writer"
+    base["feedback"] = {"writer": "Shorten it."}
+
+    Run().run(base)
+
+    assert set(roles(fake_llm)) == {"writer", "hashtag"}
+    assert fake_image.calls == []
+
+
+def test_a_writer_re_entry_also_reruns_a_flagged_image(
+    fake_llm: FakeScript, fake_image: FakeImage
+) -> None:
+    PostLLM(fake_llm)
+    base = full_state()
+    base["rerun_from"] = "writer"
+    base["feedback"] = {"writer": "Shorten it.", "image": "Match the caption."}
+
+    Run().run(base)
+
+    assert set(roles(fake_llm)) == {"writer", "image", "hashtag"}
+    assert len(fake_image.calls) == 2
+
+
+def make_main(**parts: Any) -> tuple[Any, dict[str, Any]]:
+    """The main graph with the real post subgraph and the reviewer."""
+    search = FakeSearch()
+    graph = compile_graph(
+        InMemorySaver(),
+        planner=make_planner_node(),
+        researcher=make_researcher_node(search_provider=lambda: search),
+        strategist=make_strategist_node(),
+        post_subgraph=make_post_subgraph(),
+        **parts,
+    )
+    return graph, thread_config(str(uuid.uuid4()))
+
+
+def request_state() -> GraphState:
+    initial = state()
+    for key in ("plan", "research", "strategy"):
+        del initial[key]  # type: ignore[misc]
+    return initial
+
+
+def test_the_review_loop_fixes_the_hashtags_and_then_approves(
+    fake_llm: FakeScript,
+) -> None:
+    fake_llm.queue(*shared_replies())
+    llm = PostLLM(fake_llm)
+    llm.review = lambda n: (
+        review_reply(review_issue("hashtag")) if n == 1 else review_reply()
+    )
+    graph, config = make_main()
+
+    result = graph.invoke(request_state(), config)
+
+    assert "__interrupt__" not in result
+    assert llm.seen["review"] == 2
+    assert llm.seen["tags:instagram"] == 2 and llm.seen["caption:instagram"] == 1
+    assert result["review_cycles"] == 1 and result["rerun_from"] is None
+    assert result["review"]["ok"] is True
+    assert (
+        "fix the hashtag"
+        in [c for c in fake_llm.calls if "hashtag specialist" in c.messages[0].content][
+            -1
+        ]
+        .messages[1]
+        .content
+    )
+
+
+def test_a_writer_fix_reruns_writer_and_hashtag_only(
+    fake_llm: FakeScript, fake_image: FakeImage
+) -> None:
+    fake_llm.queue(*shared_replies())
+    llm = PostLLM(fake_llm)
+    llm.review = lambda n: (
+        review_reply(review_issue("writer")) if n == 1 else review_reply()
+    )
+    graph, config = make_main()
+
+    graph.invoke(request_state(), config)
+
+    assert llm.seen["caption:instagram"] == 2 and llm.seen["tags:instagram"] == 2
+    assert llm.seen["image:instagram"] == 1 and len(fake_image.calls) == 2
+
+
+def test_the_cycle_cap_continues_with_the_remaining_errors_as_warnings(
+    fake_llm: FakeScript,
+) -> None:
+    fake_llm.queue(*shared_replies())
+    llm = PostLLM(fake_llm)
+    llm.review = lambda n: review_reply(review_issue("hashtag"))
+    graph, config = make_main()
+
+    result = graph.invoke(request_state(), config)
+
+    assert llm.seen["review"] == 3  # the first review and two fix cycles
+    assert result["review_cycles"] == 2 and result["rerun_from"] is None
+    assert result["review"]["warnings"] == ["instagram: hashtag problem"]
+    assert llm.seen["tags:instagram"] == 3
+
+
+def test_a_strategist_fix_goes_back_through_the_strategist(
+    fake_llm: FakeScript,
+) -> None:
+    fake_llm.queue(*shared_replies())
+    llm = PostLLM(fake_llm)
+    llm.review = lambda n: (
+        review_reply(review_issue("strategist")) if n == 1 else review_reply()
+    )
+    # The second strategist run (and its judge) after the shared replies:
+    graph, config = make_main()
+    original = llm._answer
+
+    def answer(call: FakeCall) -> dict[str, Any]:
+        if "social media strategist" in call.messages[0].content:
+            return {p: strat(p) for p in ("facebook", "instagram")}
+        return original(call)
+
+    fake_llm.set_default(answer)
+
+    result = graph.invoke(request_state(), config)
+
+    assert result["review_cycles"] == 1
+    assert llm.seen["caption:instagram"] == 2  # the content flow ran again
+
+
+def test_an_aborted_step_in_the_subgraph_skips_the_review(
+    fake_llm: FakeScript,
+) -> None:
+    fake_llm.queue(*shared_replies())
+    llm = PostLLM(fake_llm)
+    llm.tags = lambda platform, n: {"hashtags": ["nope"]}
+    graph, config = make_main()
+
+    paused = graph.invoke(request_state(), config)
+    assert paused["__interrupt__"][0].value["step"] == "hashtag"
+    done = graph.invoke(Command(resume={"action": "abort"}), config)
+
+    assert done["status"] == "failed"
+    assert "review" not in llm.seen

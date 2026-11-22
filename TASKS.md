@@ -62,7 +62,7 @@ Goal: run the full post-generation graph from a CLI with a fake LLM, including r
   **Done when:** put/get/delete test; fake image generates bytes with correct mime. **Dep:** B1-03.
 - [x] **B2-10 Post subgraph: writer, image, hashtag** — three checked nodes; rule checks (length limits from `platform_rules`, hashtag count, image present/size); LLM-judge for tone/relevance.
   **Done when:** subgraph produces `drafts[platform]` with caption, hashtags and one image per platform; retry feedback visibly changes the second attempt (test). **Dep:** B2-04, B2-08, B2-09. Refs: FR-5.3, FR-5.5.
-- [ ] **B2-11 Reviewer and route_after_review** — final review returning issues with `responsible_node`; `fix` routes back to that node with feedback; `max_review_cycles` respected.
+- [x] **B2-11 Reviewer and route_after_review** — final review returning issues with `responsible_node`; `fix` routes back to that node with feedback; `max_review_cycles` respected.
   **Done when:** tests for ok path, fix path, and cycle cap (continues to approval with warnings). **Dep:** B2-10. Refs: FR-6.4.
 - [ ] **B2-12 Dev runner** — `python -m app.agents.run --topic ... --type post --platforms facebook,instagram` runs the graph with fake or real LLM until the first interrupt and prints the draft.
   **Done when:** works offline with `LLM_PROVIDER=fake`. **Dep:** B2-11.

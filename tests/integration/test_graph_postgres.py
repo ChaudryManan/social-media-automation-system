@@ -124,7 +124,9 @@ def graph(saver: Any) -> Any:
     """A fresh compiled graph with fresh node objects (as a new worker would build)."""
     search = FakeSearch()
     return compile_graph(
-        saver, researcher=make_researcher_node(search_provider=lambda: search)
+        saver,
+        researcher=make_researcher_node(search_provider=lambda: search),
+        with_review=False,  # these tests cover the steps before the reviewer (B2-11)
     )
 
 

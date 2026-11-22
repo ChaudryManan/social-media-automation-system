@@ -3,14 +3,19 @@
 Today it covers the shared part of the flow::
 
     START -> validate_input -(ok)-> planner -> researcher -> strategist
-          -> content_router -(post)-> post_subgraph -> END
-                            -(video)-> video_subgraph -> END
+          -> content_router -(post)-> post_subgraph -> reviewer -> review_gate
+                            -(video)-> video_subgraph -> reviewer -> review_gate
+          review_gate -(ok)-> END
+                      -(fix)-> planner | strategist | content_router
 
 ``validate_input`` ends the run when the request is invalid. The three
 generating steps are checked nodes (retry loop and escalation, section 6.3).
 ``post_subgraph`` and ``video_subgraph`` are **placeholders** that only write
-``drafts = {}``; the real ones (B2-10, B4) are passed to :func:`build_graph`
-and will be followed by the reviewer (B2-11).
+``drafts = {}`` unless the real ones (B2-10, B4) are passed to :func:`build_graph`.
+Their output goes to the checked ``reviewer`` and the ``review_gate`` node
+(``nodes/reviewer.py``), which either ends the run (``ok``, or the cycle cap) or sends
+it back to the step to redo; the approval step (B3) will follow ``ok``. A content
+subgraph that ended with ``status="failed"`` (a human aborted a step) skips the review.
 
 ``content_router`` is a pass-through node with a conditional edge, so the
 reviewer and the approval step can send the run back to it. It is a pure
@@ -35,6 +40,13 @@ from langgraph.graph.state import CompiledStateGraph
 from app.agents.checked import CheckedNode, add_checked_node
 from app.agents.nodes.planner import make_planner_node
 from app.agents.nodes.researcher import make_researcher_node
+from app.agents.nodes.reviewer import (
+    DEFAULT_MAX_REVIEW_CYCLES,
+    make_review_gate,
+    make_reviewer_node,
+    route_after_content,
+    route_after_review,
+)
 from app.agents.nodes.strategist import make_strategist_node
 from app.agents.nodes.validate_input import (
     make_validate_input_node,
@@ -47,6 +59,7 @@ NODE_VALIDATE_INPUT = "validate_input"
 NODE_CONTENT_ROUTER = "content_router"
 NODE_POST_SUBGRAPH = "post_subgraph"
 NODE_VIDEO_SUBGRAPH = "video_subgraph"
+NODE_REVIEW_GATE = "review_gate"
 
 Node = Callable[..., Any]
 
@@ -85,13 +98,17 @@ def build_graph(
     strategist: CheckedNode | None = None,
     post_subgraph: Node | None = None,
     video_subgraph: Node | None = None,
+    reviewer: CheckedNode | None = None,
+    max_review_cycles: int = DEFAULT_MAX_REVIEW_CYCLES,
+    with_review: bool = True,
 ) -> StateGraph:
     """Build the (uncompiled) main graph.
 
     Every part can be replaced; the defaults use each builder's own defaults
     (limits from ``system_settings`` are passed in by the worker, B3).
     ``post_subgraph`` and ``video_subgraph`` may be plain node functions or
-    compiled subgraphs.
+    compiled subgraphs. ``with_review=False`` ends the run right after the content
+    subgraph (no reviewer), which keeps graph tests of earlier steps simple.
     """
     builder = StateGraph(GraphState)
 
@@ -101,6 +118,12 @@ def build_graph(
     builder.add_node(NODE_VIDEO_SUBGRAPH, video_subgraph or video_placeholder)
 
     # Wired from the end backwards: each checked node needs its successor's name.
+    reviewer_entry = None
+    if with_review:
+        builder.add_node(NODE_REVIEW_GATE, make_review_gate(max_review_cycles))
+        reviewer_entry = add_checked_node(
+            builder, reviewer or make_reviewer_node(), on_pass=NODE_REVIEW_GATE
+        )
     strategist_entry = add_checked_node(
         builder, strategist or make_strategist_node(), on_pass=NODE_CONTENT_ROUTER
     )
@@ -122,8 +145,26 @@ def build_graph(
         route_content_type,
         {"post": NODE_POST_SUBGRAPH, "video": NODE_VIDEO_SUBGRAPH},
     )
-    builder.add_edge(NODE_POST_SUBGRAPH, END)
-    builder.add_edge(NODE_VIDEO_SUBGRAPH, END)
+    if reviewer_entry is None:
+        builder.add_edge(NODE_POST_SUBGRAPH, END)
+        builder.add_edge(NODE_VIDEO_SUBGRAPH, END)
+    else:
+        for content_node in (NODE_POST_SUBGRAPH, NODE_VIDEO_SUBGRAPH):
+            builder.add_conditional_edges(
+                content_node,
+                route_after_content,
+                {"review": reviewer_entry, "failed": END},
+            )
+        builder.add_conditional_edges(
+            NODE_REVIEW_GATE,
+            route_after_review,
+            {
+                "ok": END,
+                "planner": planner_entry,
+                "strategist": strategist_entry,
+                "content": NODE_CONTENT_ROUTER,
+            },
+        )
     return builder
 
 
