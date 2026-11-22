@@ -66,7 +66,7 @@ Goal: run the full post-generation graph from a CLI with a fake LLM, including r
   **Done when:** tests for ok path, fix path, and cycle cap (continues to approval with warnings). **Dep:** B2-10. Refs: FR-6.4.
 - [x] **B2-12 Dev runner** — `python -m app.agents.run --topic ... --type post --platforms facebook,instagram` runs the graph with fake or real LLM until the first interrupt and prints the draft.
   **Done when:** works offline with `LLM_PROVIDER=fake`. **Dep:** B2-11.
-- [ ] **B2-13 Graph test suite** — retry path, escalation path, review fix loop, router both directions, multi-platform drafts.
+- [x] **B2-13 Graph test suite** — retry path, escalation path, review fix loop, router both directions, multi-platform drafts.
   **Done when:** all green, no network. **Dep:** B2-12.
 
 ## Phase B3 — Core pipeline end-to-end (M3 basic, M4, M5, M9, M10, M11, M12 core)

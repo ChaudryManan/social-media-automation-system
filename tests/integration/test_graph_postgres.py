@@ -10,9 +10,12 @@ from typing import Any
 
 import pytest
 import sqlalchemy as sa
+from app.agents.checked import StepRecord
+from app.agents.fake_flow import post_flow_replies
 from app.agents.graph import compile_graph, postgres_checkpointer, thread_config
-from app.agents.llm import FakeScript
+from app.agents.llm import FakeCall, FakeScript
 from app.agents.nodes.researcher import make_researcher_node
+from app.agents.post import make_post_subgraph
 from app.providers.search import FakeSearch
 from langgraph.types import Command
 
@@ -216,3 +219,148 @@ def test_the_default_database_url_comes_from_settings(
         get_settings.cache_clear()
 
     assert TABLES <= tables(migrated_engine)
+
+
+# --------------------------------------------------------------------------
+# The whole flow (real post subgraph and reviewer) on the Postgres saver (B2-13)
+# --------------------------------------------------------------------------
+
+FULL_FLOW = pytest.mark.usefixtures("media_root", "fake_image")
+PLATFORMS = ["facebook", "instagram"]
+
+
+def full_graph(saver: Any) -> Any:
+    """Fresh node objects with the real post subgraph and the reviewer."""
+    search = FakeSearch()
+    return compile_graph(
+        saver,
+        researcher=make_researcher_node(search_provider=lambda: search),
+        post_subgraph=make_post_subgraph(),
+    )
+
+
+def script_flow(
+    fake_llm: FakeScript, *, bad_writer_calls: int = 0, review_error: bool = False
+) -> dict[str, int]:
+    """The dev runner's valid replies; the first ``bad_writer_calls`` writer calls
+    are too short and, with ``review_error``, the first review flags the hashtags."""
+    base = post_flow_replies("Benefits of green tea", "en", PLATFORMS)
+    seen = {"writer": 0, "reviewer": 0}
+
+    def answer(call: FakeCall) -> dict[str, Any]:
+        system = call.messages[0].content
+        reply = base(call)
+        if "copywriter" in system:
+            seen["writer"] += 1
+            if seen["writer"] <= bad_writer_calls:
+                return {**reply, "caption": "Too short."}
+        if "final reviewer" in system:
+            seen["reviewer"] += 1
+            if review_error and seen["reviewer"] == 1:
+                issue = {
+                    "severity": "error",
+                    "platform": "instagram",
+                    "responsible_node": "hashtag",
+                    "message": "hashtag problem",
+                    "fix_hint": "fix the hashtag",
+                }
+                return {**reply, "ok": False, "issues": [issue]}
+        return reply
+
+    fake_llm.set_default(answer)
+    return seen
+
+
+@FULL_FLOW
+def test_a_full_post_run_with_review_is_readable_from_a_later_connection(
+    fake_llm: FakeScript, ckpt_url: str
+) -> None:
+    script_flow(fake_llm)
+    config = thread_config("req-1")
+
+    with postgres_checkpointer(ckpt_url) as saver:
+        result = full_graph(saver).invoke(request(), config)
+    assert "__interrupt__" not in result
+
+    with postgres_checkpointer(ckpt_url) as saver:  # a later connection
+        final = full_graph(saver).get_state(config)
+
+    assert final.next == ()
+    assert set(final.values["drafts"]) == {"facebook", "instagram"}
+    assert final.values["review"]["ok"] is True
+    for draft in final.values["drafts"].values():
+        assert draft["caption"] and draft["hashtags"] and len(draft["media"]) == 1
+
+
+@FULL_FLOW
+def test_an_escalation_in_the_post_subgraph_resumes_after_a_worker_restart(
+    fake_llm: FakeScript, ckpt_url: str
+) -> None:
+    script_flow(fake_llm, bad_writer_calls=6)  # three failed attempts, two platforms
+    config = thread_config("req-1")
+
+    with postgres_checkpointer(ckpt_url) as saver:
+        paused = full_graph(saver).invoke(request(), config)
+    (interrupt,) = paused["__interrupt__"]
+    assert interrupt.value["step"] == "writer"
+    assert interrupt.value["reason"] == "retries_exhausted"
+
+    # "Restart": new connection, new saver, new graph and node objects.
+    with postgres_checkpointer(ckpt_url) as saver:
+        compiled = full_graph(saver)
+        parent = compiled.get_state(config, subgraphs=True)
+        assert parent.next == ("post_subgraph",)  # paused inside the subgraph
+        (task,) = parent.tasks
+        assert task.state.next == ("escalate_writer",)
+        done = compiled.invoke(Command(resume={"action": "retry"}), config)
+        final = compiled.get_state(config)
+
+    assert "__interrupt__" not in done
+    assert final.next == ()
+    assert final.values["plan"]["goal"] == "awareness"  # earlier steps were kept
+    assert set(final.values["drafts"]) == {"facebook", "instagram"}
+    assert final.values["review"]["ok"] is True
+    assert final.values["retries"]["writer"] == 0  # reset by the human's retry
+
+
+@FULL_FLOW
+def test_an_abort_after_a_worker_restart_ends_the_run_as_failed(
+    fake_llm: FakeScript, ckpt_url: str
+) -> None:
+    script_flow(fake_llm, bad_writer_calls=6)
+    config = thread_config("req-1")
+    with postgres_checkpointer(ckpt_url) as saver:
+        full_graph(saver).invoke(request(), config)
+
+    with postgres_checkpointer(ckpt_url) as saver:
+        compiled = full_graph(saver)
+        compiled.invoke(Command(resume={"action": "abort"}), config)
+        final = compiled.get_state(config)
+
+    assert final.next == ()
+    assert final.values["status"] == "failed"
+    assert any("writer" in error for error in final.values["errors"])
+    assert "review" not in final.values or final.values["review"] is None
+
+
+@FULL_FLOW
+def test_the_review_fix_loop_is_checkpointed_and_step_rows_are_recorded(
+    fake_llm: FakeScript, ckpt_url: str
+) -> None:
+    script_flow(fake_llm, review_error=True)
+    records: list[StepRecord] = []
+    config = thread_config("req-1", step_recorder=records.append)
+
+    with postgres_checkpointer(ckpt_url) as saver:
+        result = full_graph(saver).invoke(request(), config)
+    with postgres_checkpointer(ckpt_url) as saver:
+        final = full_graph(saver).get_state(thread_config("req-1"))
+
+    assert "__interrupt__" not in result
+    assert [(r.node_name, r.attempt) for r in records if r.node_name == "hashtag"] == [
+        ("hashtag", 1),
+        ("hashtag", 2),
+    ]
+    assert final.values["review_cycles"] == 1
+    assert final.values["rerun_from"] is None
+    assert final.values["review"]["ok"] is True
